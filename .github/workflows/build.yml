@@ -1,0 +1,51 @@
+name: Windows Kurulum Paketi
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python bağımlılıkları
+        run: |
+          pip install customtkinter selenium pyinstaller pywin32 webdriver-manager pillow
+
+      - name: İkon ICO dosyası oluştur
+        run: |
+          python -c "
+from PIL import Image
+img = Image.open('icon.png').convert('RGBA')
+img.save('icon.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
+print('icon.ico hazir')
+"
+
+      - name: PyInstaller ile derle
+        run: |
+          pyinstaller wa_mail_bot.spec
+
+      - name: Inno Setup kur
+        run: |
+          choco install innosetup --yes
+
+      - name: Kurulum paketi oluştur (Inno Setup)
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+
+      - name: Kurulum EXE'sini yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: PregateMail_Kurulum
+          path: installer_output\PregateMail_Kurulum.exe
+          retention-days: 60
