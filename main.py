@@ -131,25 +131,37 @@ Pregate Araç Kontrol Sistemi
 
 def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi):
     if not OUTLOOK_OK: return False, "pywin32 yüklü değil"
-    try:
-        tarih = datetime.now().strftime("%d.%m.%Y %H:%M")
-        ol    = win32com.client.Dispatch("Outlook.Application")
-        mail  = ol.CreateItem(0)
-        mail.Subject = f"[KAYIT RED] {kural_ad} – {tarih}"
-        mail.Body    = MAIL_SABLON.format(
-            tarih=tarih, gonderen=gonderen,
-            grup=grup_adi, mesaj=mesaj)
-        mail.To = "; ".join(mail_list)
-        if from_account:
+    sonuc = [False, ""]
+    def _gonder():
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            tarih = datetime.now().strftime("%d.%m.%Y %H:%M")
+            ol    = win32com.client.Dispatch("Outlook.Application")
+            mail  = ol.CreateItem(0)
+            mail.Subject = f"[KAYIT RED] {kural_ad} – {tarih}"
+            mail.Body    = MAIL_SABLON.format(
+                tarih=tarih, gonderen=gonderen,
+                grup=grup_adi, mesaj=mesaj)
+            mail.To = "; ".join(mail_list)
+            if from_account:
+                try:
+                    for acc in ol.GetNamespace("MAPI").Accounts:
+                        if acc.SmtpAddress.lower() == from_account.lower():
+                            mail.SendUsingAccount = acc; break
+                except: pass
+            mail.Send()
+            sonuc[0] = True; sonuc[1] = "OK"
+        except Exception as e:
+            sonuc[0] = False; sonuc[1] = str(e)
+        finally:
             try:
-                for acc in ol.GetNamespace("MAPI").Accounts:
-                    if acc.SmtpAddress.lower() == from_account.lower():
-                        mail.SendUsingAccount = acc; break
+                import pythoncom
+                pythoncom.CoUninitialize()
             except: pass
-        mail.Send()
-        return True, "OK"
-    except Exception as e:
-        return False, str(e)
+    t = threading.Thread(target=_gonder)
+    t.start(); t.join(timeout=30)
+    return sonuc[0], sonuc[1]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MESAJ BİRİKTİRİCİ
@@ -191,44 +203,58 @@ class MesajBiriktiric:
 # QR bir kez taranır, sonra profil kaydedilir
 # ══════════════════════════════════════════════════════════════════════════════
 class WABot:
-    # JavaScript: sayfadaki son mesajları oku
+    # JavaScript: sayfadaki son gelen mesajları oku
     JS_MESAJLARI_OKU = """
     const mesajlar = [];
-    // Gelen mesaj kutucukları (kendi mesajlarımız hariç)
-    const els = document.querySelectorAll(
-        '[class*="message-in"], [data-testid="msg-container"]'
+    // Tüm mesaj satırlarını al
+    const rows = document.querySelectorAll(
+        '[data-testid="msg-container"]' 
     );
-    els.forEach(el => {
-        // Metin
+    rows.forEach(el => {
+        // Kendi mesajımızı atla (message-out class'ı var)
+        if (el.closest('[class*="message-out"]')) return;
+
+        // Metin — tüm olası selector'ları dene
         let text = '';
-        const textEl = el.querySelector(
-            '[data-testid="msg-text"], span.selectable-text, ' +
-            'span[dir="ltr"], [class*="selectable-text"]'
-        );
-        if (textEl) text = textEl.innerText || textEl.textContent || '';
+        const selectors = [
+            '[data-testid="msg-text"]',
+            'span.selectable-text.copyable-text',
+            'span[class*="selectable-text"]',
+            'div[class*="copyable-text"] span[dir]',
+        ];
+        for (const sel of selectors) {
+            const el2 = el.querySelector(sel);
+            if (el2 && el2.innerText) { text = el2.innerText.trim(); break; }
+        }
 
-        // Gönderen
+        // Gönderen — copyable-text data-pre-plain-text içinden
         let sender = '';
-        const senderEl = el.querySelector(
-            '[data-testid="author"], ._ahxt, span[class*="author"]'
-        );
-        if (senderEl) sender = senderEl.innerText || '';
+        const copyable = el.querySelector('[data-pre-plain-text]');
+        if (copyable) {
+            const pre = copyable.getAttribute('data-pre-plain-text') || '';
+            // Format: "[HH:MM, DD.MM.YYYY] Ad Soyad: "
+            const m = pre.match(/\] (.+?):\s*$/);
+            if (m) sender = m[1].trim();
+        }
+        if (!sender) {
+            const sEl = el.querySelector('[data-testid="author"]');
+            if (sEl) sender = sEl.innerText || '';
+        }
 
-        // Zaman damgası (mesajı tanımlamak için)
-        let ts = '';
-        const tsEl = el.querySelector('[data-testid="msg-meta"]');
-        if (tsEl) ts = tsEl.innerText || '';
+        // Benzersiz ID
+        const msgId = el.getAttribute('data-id') ||
+                      el.getAttribute('data-key') ||
+                      (sender + '::' + text.substring(0,30));
 
-        // data-id özelliği
-        const msgId = el.getAttribute('data-id') || 
-                      el.getAttribute('data-key') || 
-                      (sender + ts + text.substring(0,20));
-
-        if (text || sender) {
-            mesajlar.push({id: msgId, text: text.trim(), sender: sender.trim()});
+        if (text && text.length > 0) {
+            mesajlar.push({
+                id: msgId,
+                text: text,
+                sender: sender || 'Bilinmiyor'
+            });
         }
     });
-    return mesajlar;
+    return mesajlar.slice(-30);  // Son 30 mesaj
     """
 
     def __init__(self, on_log, on_status, on_message):
