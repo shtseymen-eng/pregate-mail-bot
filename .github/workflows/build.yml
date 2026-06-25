@@ -8,18 +8,15 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Kodu cek
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Python 3.11 kur
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Bagimliliklar
-        run: pip install customtkinter pyinstaller pywin32 pyautogui pyperclip pillow
+        run: pip install customtkinter pyinstaller pywin32 pillow
 
       - name: Ikon olustur
         run: python make_ico.py
@@ -30,7 +27,7 @@ jobs:
       - name: Inno Setup kur
         run: choco install innosetup --yes
 
-      - name: Setup paketi olustur
+      - name: Setup olustur
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss'
 
       - name: Artifact yukle

@@ -8,13 +8,12 @@ a = Analysis(
         'customtkinter',
         'win32com', 'win32com.client', 'win32gui', 'win32con',
         'win32process', 'win32api', 'pywintypes',
-        'pyautogui', 'pyperclip',
-        'sqlite3', 'PIL', 'PIL.Image', 'PIL.ImageTk',
-        'pkg_resources',
+        'sqlite3', 'glob',
+        'PIL', 'PIL.Image', 'PIL.ImageTk',
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=['selenium','pyautogui','pyperclip'],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
