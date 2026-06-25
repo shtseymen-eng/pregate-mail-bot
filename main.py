@@ -371,6 +371,18 @@ class WABot:
 
     def _dinle(self):
         """Her 10 sn'de JS ile mesajları oku."""
+        # Başlangıçta mevcut mesajları seen'e al — mail gönderme
+        self.on_log("📋 Mevcut mesajlar taranıyor (mail gönderilmeyecek)…")
+        try:
+            mesajlar = self._driver.execute_script(self.JS_MESAJLARI_OKU)
+            if mesajlar:
+                now_ts = time.time()
+                for m in mesajlar:
+                    mid = m.get("id","")
+                    if mid:
+                        self._seen[mid] = now_ts
+                self.on_log(f"✅ {len(mesajlar)} eski mesaj atlandı. Yeni mesajlar bekleniyor…")
+        except: pass
         dongu = 0
         while self.running:
             try:
