@@ -1,6 +1,6 @@
 import customtkinter as ctk
 import threading
-import json, os, sys, time, glob, uuid, tempfile
+import json, os, sys, time, uuid, tempfile, glob
 import sqlite3 as _sqlite3
 from datetime import datetime
 from tkinter import messagebox, ttk
@@ -20,10 +20,15 @@ except ImportError:
     OUTLOOK_OK = False
 
 try:
-    import win32gui, win32con
-    WIN32_OK = True
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+    SELENIUM_OK = True
 except ImportError:
-    WIN32_OK = False
+    SELENIUM_OK = False
 
 # ── Tema ────────────────────────────────────────────────────────────────────
 RENK_ANA_ARKA = "#071320"
@@ -47,10 +52,12 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-DB_FILE     = os.path.join(BASE_DIR, "kayitlar.db")
+CONFIG_FILE  = os.path.join(BASE_DIR, "config.json")
+DB_FILE      = os.path.join(BASE_DIR, "kayitlar.db")
+PROFILE_DIR  = os.path.join(BASE_DIR, "chrome_profile")
+os.makedirs(PROFILE_DIR, exist_ok=True)
 
-BEKLEME_SURE = 120   # saniye — aynı kişiden mesaj toplama süresi
+BEKLEME_SURE = 120
 
 # ── Config ──────────────────────────────────────────────────────────────────
 def load_config():
@@ -87,7 +94,7 @@ def db_rapor(yil, ay):
         (f"{yil:04d}-{ay:02d}%",)).fetchall()
     gunluk = {}
     for r in rows:
-        g = r[0][:10]; gunluk[g] = gunluk.get(g,0)+1
+        g=r[0][:10]; gunluk[g]=gunluk.get(g,0)+1
     con.close()
     return rows, gunluk
 
@@ -145,46 +152,33 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi):
         return False, str(e)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MESAJ BİRİKTİRİCİ — aynı kişiden 2 dk içinde gelen mesajları toplar
+# MESAJ BİRİKTİRİCİ
 # ══════════════════════════════════════════════════════════════════════════════
 class MesajBiriktiric:
     def __init__(self, on_gonder, bekleme=BEKLEME_SURE):
-        self.on_gonder  = on_gonder   # (gonderen, birlesik_metin) callback
-        self.bekleme    = bekleme
-        self._kuyruk    = {}          # gonderen → {"metinler":[], "timer":Timer}
-        self._lock      = threading.Lock()
+        self.on_gonder = on_gonder
+        self.bekleme   = bekleme
+        self._kuyruk   = {}
+        self._lock     = threading.Lock()
 
     def ekle(self, gonderen, metin):
-        """Yeni mesaj geldi — biriktiriciye ekle, timer sıfırla."""
         with self._lock:
             if gonderen not in self._kuyruk:
-                self._kuyruk[gonderen] = {"metinler": [], "timer": None}
-
+                self._kuyruk[gonderen] = {"metinler":[], "timer":None}
             self._kuyruk[gonderen]["metinler"].append(metin)
-
-            # Varolan timer'ı iptal et
             t = self._kuyruk[gonderen]["timer"]
             if t: t.cancel()
-
-            # Yeni timer — 2 dk sonra gönder
-            yeni_t = threading.Timer(
-                self.bekleme,
-                self._gonder,
-                args=[gonderen])
+            yeni_t = threading.Timer(self.bekleme, self._gonder, args=[gonderen])
             yeni_t.daemon = True
             yeni_t.start()
             self._kuyruk[gonderen]["timer"] = yeni_t
 
     def _gonder(self, gonderen):
-        """2 dk doldu — biriken mesajları gönder."""
         with self._lock:
-            if gonderen not in self._kuyruk:
-                return
+            if gonderen not in self._kuyruk: return
             metinler = self._kuyruk.pop(gonderen)["metinler"]
-
         if metinler:
-            birlesik = "\n".join(metinler)
-            self.on_gonder(gonderen, birlesik)
+            self.on_gonder(gonderen, "\n".join(metinler))
 
     def temizle(self):
         with self._lock:
@@ -193,365 +187,215 @@ class MesajBiriktiric:
             self._kuyruk.clear()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WHATSAPP DB OKUYUCU
+# WHATSAPP WEB BOT — Selenium + JavaScript ile mesaj okuma
+# QR bir kez taranır, sonra profil kaydedilir
 # ══════════════════════════════════════════════════════════════════════════════
 class WABot:
-    WA_DB_PATTERNS = [
-        r"%LOCALAPPDATA%\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalState\messages.db",
-        r"%LOCALAPPDATA%\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalState\default\messages.db",
-        r"%LOCALAPPDATA%\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalCache\Roaming\WhatsApp\messages.db",
-        r"%LOCALAPPDATA%\Packages\5319275A.WhatsApp_cv1g1gvanyjgm\LocalState\messages.db",
-        r"%LOCALAPPDATA%\Packages\5319275A.WhatsApp_cv1g1gvanyjgm\LocalState\default\messages.db",
-        r"%LOCALAPPDATA%\WhatsApp\messages.db",
-        r"%APPDATA%\WhatsApp\messages.db",
-    ]
+    # JavaScript: sayfadaki son mesajları oku
+    JS_MESAJLARI_OKU = """
+    const mesajlar = [];
+    // Gelen mesaj kutucukları (kendi mesajlarımız hariç)
+    const els = document.querySelectorAll(
+        '[class*="message-in"], [data-testid="msg-container"]'
+    );
+    els.forEach(el => {
+        // Metin
+        let text = '';
+        const textEl = el.querySelector(
+            '[data-testid="msg-text"], span.selectable-text, ' +
+            'span[dir="ltr"], [class*="selectable-text"]'
+        );
+        if (textEl) text = textEl.innerText || textEl.textContent || '';
+
+        // Gönderen
+        let sender = '';
+        const senderEl = el.querySelector(
+            '[data-testid="author"], ._ahxt, span[class*="author"]'
+        );
+        if (senderEl) sender = senderEl.innerText || '';
+
+        // Zaman damgası (mesajı tanımlamak için)
+        let ts = '';
+        const tsEl = el.querySelector('[data-testid="msg-meta"]');
+        if (tsEl) ts = tsEl.innerText || '';
+
+        // data-id özelliği
+        const msgId = el.getAttribute('data-id') || 
+                      el.getAttribute('data-key') || 
+                      (sender + ts + text.substring(0,20));
+
+        if (text || sender) {
+            mesajlar.push({id: msgId, text: text.trim(), sender: sender.trim()});
+        }
+    });
+    return mesajlar;
+    """
 
     def __init__(self, on_log, on_status, on_message):
-        self.on_log      = on_log
-        self.on_status   = on_status
-        self.on_message  = on_message   # (gonderen, metin_birikik) — 2dk sonra tetiklenir
-        self.running     = False
-        self._son_id     = 0
-        self._wa_db      = None
-        self._tablo      = None    # hangi tablo kullanılıyor
-        self._kolon_map  = {}      # sütun isimleri haritası
+        self.on_log     = on_log
+        self.on_status  = on_status
+        self.on_message = on_message
+        self.running    = False
+        self._driver    = None
+        self._seen      = set()
         self._biriktiric = None
 
     def start(self):
         self.running = True
-        self.on_status("START", "● Başlatılıyor…", RENK_SARI)
+        global BEKLEME_SURE
+        cfg = load_config()
+        BEKLEME_SURE = cfg.get("bekleme_dk", 2) * 60
         self._biriktiric = MesajBiriktiric(
             on_gonder=self.on_message,
             bekleme=BEKLEME_SURE)
 
-        self.on_log("🔍 WhatsApp DB aranıyor…")
-        db = self._wa_db_bul()
-        self.on_log(f"🔎 Arama tamamlandı: {'bulundu' if db else 'bulunamadı'}")
-        if db:
-            # Erişim testi
-            try:
-                with open(db, "rb") as f:
-                    f.read(16)
-                self.on_log(f"✅ DB bulundu ve okunabilir: {os.path.basename(db)}")
-                self.on_log(f"   Tam yol: {db}")
-            except PermissionError:
-                self.on_log(f"❌ DB bulundu ama erişim reddedildi: {db}")
-                self.on_log("   Windows izin kısıtlaması var.")
-                db = None
-            except Exception as e:
-                self.on_log(f"⚠ DB erişim hatası: {e}")
-                db = None
-        if db:
-            self._wa_db = db
-            self.on_log(f"✅ DB hazır: {os.path.basename(db)}")
-            self.on_log("🔬 DB şeması inceleniyor…")
-            self._db_kesfet()
-            self.on_log("📌 Başlangıç ID alınıyor…")
-            self._son_id = self._son_id_al()
-            self.on_log(f"📌 Başlangıç ID: {self._son_id}")
-            self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
-            self.on_log("✅ Hazır! Yeni mesaj bekleniyor…")
-            self._dinle()
-        else:
-            self.on_log("❌ WhatsApp Desktop DB bulunamadı veya erişim reddedildi.")
-            self.on_log("📋 Kontrol edilecek yollar:")
-            appdata = os.environ.get("LOCALAPPDATA","")
-            pkg = os.path.join(appdata,"Packages","5319275A.WhatsAppDesktop_cv1g1gvanyjgm")
-            self.on_log(f"   Paket: {pkg}")
-            self.on_log(f"   Paket var mı: {os.path.exists(pkg)}")
-            ls = os.path.join(pkg,"LocalState")
-            self.on_log(f"   LocalState: {os.path.exists(ls)}")
-            sess = os.path.join(ls,"sessions")
-            self.on_log(f"   sessions: {os.path.exists(sess)}")
-            if os.path.exists(sess):
+        self.on_status("START", "● Başlatılıyor…", RENK_SARI)
+        self.on_log("🌐 Chrome açılıyor (WhatsApp Web)…")
+
+        try:
+            opts = Options()
+            opts.add_argument(f"--user-data-dir={PROFILE_DIR}")
+            opts.add_argument("--profile-directory=WABot")
+            opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-notifications")
+            opts.add_argument("--disable-popup-blocking")
+            # Arka planda çalış — görünür pencere bırak (QR için)
+            # opts.add_argument("--headless")
+
+            self._driver = webdriver.Chrome(options=opts)
+            self._driver.get("https://web.whatsapp.com")
+
+            self.on_log("📷 İlk kullanımda QR taratın — sonra otomatik giriş yapar.")
+            self.on_status("QR", "● QR Bekleniyor", RENK_SARI)
+
+            # Giriş bekle (maks 3 dk)
+            self.on_log("⏳ WhatsApp Web yükleniyor…")
+            WebDriverWait(self._driver, 180).until(
+                lambda d: d.execute_script(
+                    "return document.querySelector('[data-testid=\"chat-list\"],"
+                    "[aria-label*=\"Sohbet\"], [aria-label*=\"Chat\"]') !== null"
+                )
+            )
+
+            self.on_log("✅ WhatsApp Web bağlandı!")
+            self.on_status("OK", "● Bağlandı ✓", RENK_YESIL)
+
+            # Gruba git
+            self._gruba_git()
+
+        except TimeoutException:
+            self.on_log("⏱ QR zaman aşımı — lütfen tekrar başlatın.")
+            self.on_status("ERR", "● Zaman Aşımı", RENK_KIRMIZI)
+            self.running = False
+        except WebDriverException as e:
+            self.on_log(f"❌ Chrome hatası: {str(e)[:100]}")
+            self.on_status("ERR", "● Chrome Hatası", RENK_KIRMIZI)
+            self.running = False
+
+    def _gruba_git(self):
+        cfg  = load_config()
+        grup = cfg.get("wa_group_name","").strip()
+        if not grup:
+            self.on_log("⚠ Grup adı boş! Ayarlar'dan girin.")
+            return
+
+        self.on_log(f"🔍 '{grup}' grubu aranıyor…")
+        try:
+            # Arama kutusunu bul — birden fazla selector dene
+            for sel in [
+                '[data-testid="chat-list-search"]',
+                '[aria-label="Sohbet veya kişi ara"]',
+                '[aria-label="Search or start new chat"]',
+                'div[contenteditable="true"]',
+            ]:
                 try:
-                    items = os.listdir(sess)
-                    self.on_log(f"   sessions içi: {items}")
-                    for h in items:
-                        hdir = os.path.join(sess,h)
-                        if os.path.isdir(hdir):
-                            try:
-                                fs = os.listdir(hdir)
-                                self.on_log(f"   {h}: {fs}")
-                            except Exception as e:
-                                self.on_log(f"   {h}: ERİŞİM REDDEDİLDİ - {e}")
-                except Exception as e:
-                    self.on_log(f"   sessions listelenemedi: {e}")
-            self.on_status("WARN", "● DB Bulunamadı", RENK_KIRMIZI)
-            while self.running:
-                time.sleep(30)
-                db2 = self._wa_db_bul()
-                if db2:
-                    self._wa_db = db2
-                    self.on_log("✅ DB bulundu, başlatılıyor…")
-                    self._db_kesfet()
-                    self._son_id = self._son_id_al()
-                    self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
-                    self._dinle()
-                    return
+                    sb = WebDriverWait(self._driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                    break
+                except: continue
 
-    def _wa_db_bul(self):
-        """WhatsApp Desktop DB'sini bul — hızlı, os.walk yok."""
-        appdata = os.environ.get("LOCALAPPDATA","")
+            sb.click()
+            time.sleep(0.5)
+            sb.send_keys(grup)
+            time.sleep(2)
 
-        for pkg in [self.WA_PKG, self.WA_PKG_OLD]:
-            pkg_path = os.path.join(appdata,"Packages",pkg)
-            if not os.path.exists(pkg_path):
-                continue
+            # İlk sonucu tıkla
+            for sel in [
+                f'[title="{grup}"]',
+                '[data-testid="cell-frame-container"]',
+                'div[role="listitem"]',
+            ]:
+                try:
+                    el = WebDriverWait(self._driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                    el.click()
+                    break
+                except: continue
 
-            # 1. Doğrudan LocalState altı
-            ls = os.path.join(pkg_path,"LocalState")
-            if os.path.exists(ls):
-                for db in self.WA_DB_NAMES:
-                    p = os.path.join(ls,db)
-                    if os.path.exists(p): return p
+            time.sleep(2)
+            self.on_log(f"📌 '{grup}' grubuna girildi.")
+            self.on_log("👂 Mesajlar izleniyor (10 sn'de bir kontrol)…")
+            self._dinle()
 
-                # 2. LocalState/sessions/<hash>/ altı
-                sessions = os.path.join(ls,"sessions")
-                if os.path.exists(sessions):
-                    for h in os.listdir(sessions):
-                        hdir = os.path.join(sessions,h)
-                        if os.path.isdir(hdir):
-                            for db in self.WA_DB_NAMES:
-                                p = os.path.join(hdir,db)
-                                if os.path.exists(p): return p
-
-            # 3. LocalCache altı
-            lc = os.path.join(pkg_path,"LocalCache","Roaming","WhatsApp")
-            if os.path.exists(lc):
-                for db in self.WA_DB_NAMES:
-                    p = os.path.join(lc,db)
-                    if os.path.exists(p): return p
-
-        # 4. Wildcard ile paket adı farklıysa
-        for pat in [
-            os.path.join(appdata,"Packages","5319275A.WhatsAppDesktop*"),
-            os.path.join(appdata,"Packages","5319275A.WhatsApp*"),
-        ]:
-            for pkg_path in glob.glob(pat):
-                ls = os.path.join(pkg_path,"LocalState")
-                if not os.path.exists(ls): continue
-                for db in self.WA_DB_NAMES:
-                    p = os.path.join(ls,db)
-                    if os.path.exists(p): return p
-                sessions = os.path.join(ls,"sessions")
-                if os.path.exists(sessions):
-                    for h in os.listdir(sessions):
-                        hdir = os.path.join(sessions,h)
-                        if not os.path.isdir(hdir): continue
-                        for db in self.WA_DB_NAMES:
-                            p = os.path.join(hdir,db)
-                            if os.path.exists(p): return p
-
-        # 5. Standalone
-        for p in [
-            os.path.join(appdata,"WhatsApp","messages.db"),
-            os.path.join(os.environ.get("APPDATA",""),"WhatsApp","messages.db"),
-        ]:
-            if os.path.exists(p): return p
-
-        return None
-
-    def _wa_tum_dosyalari_logla(self):
-        """DB bulunamazsa tüm WA paket içeriğini logla — debug için."""
-        appdata = os.environ.get("LOCALAPPDATA","")
-        pkg_dir = os.path.join(appdata,"Packages")
-        self.on_log("🔍 WA paket klasörleri taranıyor…")
-        bulundu = False
-        if os.path.exists(pkg_dir):
-            for d in os.listdir(pkg_dir):
-                if "whatsapp" in d.lower():
-                    bulundu = True
-                    self.on_log(f"📁 Paket: {d}")
-                    tam = os.path.join(pkg_dir, d)
-                    for root, dirs, files in os.walk(tam):
-                        seviye = root.replace(tam,"").count(os.sep)
-                        if seviye > 4: continue
-                        for f in files:
-                            if f.endswith((".db",".sqlite",".sqlite3",".ldb")):
-                                yol = os.path.join(root,f)
-                                self.on_log(f"   💾 {yol.replace(pkg_dir,'')}")
-        if not bulundu:
-            self.on_log("❌ Hiç WhatsApp paketi bulunamadı!")
-            self.on_log("   Microsoft Store → WhatsApp Desktop yükleyin.")
-
-    def _db_kesfet(self):
-        """DB şemasını keşfet — tablo ve sütun isimlerini bul.
-        WA Desktop yeni versiyonda mesajlar genericStorage.db içinde.
-        """
-        try:
-            con = _sqlite3.connect(
-                f"file:{self._wa_db}?mode=ro&nolock=1", uri=True, timeout=5)
-            cur = con.cursor()
-
-            tabloler = [r[0] for r in cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-            self.on_log(f"📊 {os.path.basename(self._wa_db)} tabloları: {', '.join(tabloler)}")
-
-            # Önce bilinen mesaj tablolarını dene
-            for tbl in ["messages","message","msgs","chat_messages",
-                        "kv","key_value","storage","data"]:
-                if tbl in tabloler:
-                    self._tablo = tbl; break
-
-            if not self._tablo and tabloler:
-                # En fazla satırı olan tabloyu seç
-                max_count = 0
-                for tbl in tabloler:
-                    try:
-                        c = cur.execute(
-                            f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]
-                        if c > max_count:
-                            max_count=c; self._tablo=tbl
-                    except: pass
-
-            if self._tablo:
-                cols = [r[1] for r in cur.execute(
-                    f"PRAGMA table_info([{self._tablo}])").fetchall()]
-                self.on_log(f"📋 Tablo: {self._tablo}")
-                self.on_log(f"   Sütunlar: {', '.join(cols)}")
-                self._kolon_map = self._sütun_haritasi(cols)
-
-                # genericStorage.db için özel kontrol
-                if "generic" in self._wa_db.lower() or "kv" in tabloler:
-                    self.on_log("ℹ genericStorage DB — anahtar-değer formatı")
-                    self._mod = "kv"
-                else:
-                    self._mod = "normal"
-            else:
-                self.on_log("⚠ Tablo bulunamadı!")
-            con.close()
         except Exception as e:
-            self.on_log(f"⚠ DB keşif hatası: {e}")
-
-    def _sütun_haritasi(self, cols):
-        """Sütun isimlerini standart isimlere eşle."""
-        cols_lower = {c.lower(): c for c in cols}
-        harita = {}
-
-        # Chat/grup alanı
-        for c in ["chat_jid","chat_id","chatid","jid","remote_jid","remotejid",
-                  "conversation_jid","group_jid","thread_id"]:
-            if c in cols_lower:
-                harita["chat"] = cols_lower[c]; break
-
-        # Gönderen
-        for c in ["sender","sender_jid","from","participant","push_name",
-                  "pushname","author","notify_name","notifyname","name"]:
-            if c in cols_lower:
-                harita["sender"] = cols_lower[c]; break
-
-        # Metin
-        for c in ["text","body","message","content","message_text",
-                  "messagetext","data","msg","text_data"]:
-            if c in cols_lower:
-                harita["text"] = cols_lower[c]; break
-
-        # Zaman
-        for c in ["timestamp","time","date","created_at","message_timestamp",
-                  "sent_at","received_at"]:
-            if c in cols_lower:
-                harita["time"] = cols_lower[c]; break
-
-        return harita
-
-    def _son_id_al(self):
-        if not self._tablo: return 0
-        try:
-            con = _sqlite3.connect(
-                f"file:{self._wa_db}?mode=ro&nolock=1", uri=True, timeout=5)
-            row = con.execute(
-                f"SELECT MAX(rowid) FROM [{self._tablo}]").fetchone()
-            con.close()
-            return row[0] if row and row[0] else 0
-        except: return 0
+            self.on_log(f"⚠ Grup açma hatası: {e}")
+            self.on_log("ℹ Grubu WhatsApp Web'de manuel açın, bot dinlemeye devam eder.")
+            self._dinle()
 
     def _dinle(self):
-        """10 sn'de bir DB kontrol et."""
-        cfg = load_config()
-        hedef = cfg.get("wa_group_name","").strip().lower()
-        self.on_log(f"👂 Dinleniyor: grup='{hedef}' | DB: {os.path.basename(self._wa_db)}")
+        """Her 10 sn'de JS ile mesajları oku."""
         dongu = 0
         while self.running:
             try:
-                self._kontrol(hedef)
+                self._mesajlari_oku()
                 dongu += 1
-                if dongu % 6 == 0:  # her 60 sn
-                    self.on_log(f"⏳ Aktif ({dongu*10}sn) | Son ID: {self._son_id}")
+                if dongu % 6 == 0:
+                    self.on_log(f"⏳ Aktif — {dongu*10}sn")
+            except WebDriverException as e:
+                if "chrome not reachable" in str(e).lower():
+                    self.on_log("❌ Chrome kapandı!")
+                    self.on_status("ERR", "● Bağlantı Kesildi", RENK_KIRMIZI)
+                    break
+                self.on_log(f"⚠ {str(e)[:60]}")
             except Exception as e:
-                self.on_log(f"⚠ Kontrol hatası: {e}")
+                self.on_log(f"⚠ Hata: {str(e)[:60]}")
             time.sleep(10)
 
-    def _kontrol(self, hedef_grup):
-        if not self._tablo: return
+    def _mesajlari_oku(self):
+        """JavaScript ile sayfadaki mesajları oku."""
         try:
-            con = _sqlite3.connect(
-                f"file:{self._wa_db}?mode=ro&nolock=1", uri=True, timeout=5)
-            con.row_factory = _sqlite3.Row
-            cur = con.cursor()
+            mesajlar = self._driver.execute_script(self.JS_MESAJLARI_OKU)
+            if not mesajlar:
+                return
 
-            rows = cur.execute(
-                f"SELECT rowid,* FROM [{self._tablo}] "
-                f"WHERE rowid > ? ORDER BY rowid",
-                (self._son_id,)).fetchall()
-            con.close()
+            for m in mesajlar:
+                msg_id  = m.get("id","")
+                text    = m.get("text","").strip()
+                sender  = m.get("sender","Bilinmiyor").strip()
 
-            for row in rows:
-                self._son_id = max(self._son_id, row["rowid"])
-                d = dict(row)
-
-                # genericStorage (kv) modunda tüm değerleri tara
-                mod = getattr(self, "_mod", "normal")
-                if mod == "kv":
-                    # key-value formatı: anahtar kelime ara
-                    val = str(d.get("value") or d.get("val") or
-                             d.get("data") or "")
-                    if not val or len(val) < 3: continue
-                    # JSON içinde metin ara
-                    import json as _json
-                    try:
-                        parsed = _json.loads(val)
-                        if isinstance(parsed, dict):
-                            text = (parsed.get("text") or
-                                    parsed.get("body") or
-                                    parsed.get("message") or "")
-                            sender = (parsed.get("sender") or
-                                      parsed.get("from") or
-                                      parsed.get("pushName") or "Bilinmiyor")
-                            chat = str(parsed.get("chat") or
-                                      parsed.get("jid") or "")
-                        else:
-                            continue
-                    except:
-                        continue
-                else:
-                    chat   = str(d.get(self._kolon_map.get("chat",""),"") or "").lower()
-                    sender = str(d.get(self._kolon_map.get("sender",""),"") or "Bilinmiyor")
-                    text   = str(d.get(self._kolon_map.get("text",""),"") or "")
-                    if not self._kolon_map.get("text"):
-                        for k,v in d.items():
-                            if isinstance(v,str) and len(v)>2 and k not in (
-                                    "rowid","id","key_id","_id"):
-                                text=v; break
-
-                if hedef_grup and chat and hedef_grup not in chat:
+                if not msg_id or msg_id in self._seen:
                     continue
-                if not text or text in ("null","None",""): continue
+                self._seen.add(msg_id)
 
-                sender_clean = sender.split("@")[0] if "@" in sender else sender
-                self.on_log(f"📩 [{sender_clean}]: {text[:60]}")
-                self._biriktiric.ekle(sender_clean, text)
+                if not text:
+                    continue
 
-        except _sqlite3.OperationalError as e:
-            if "locked" in str(e).lower() or "readonly" in str(e).lower():
-                pass
-            else:
-                raise
+                self.on_log(f"📩 [{sender}]: {text[:60]}")
+                self._biriktiric.ekle(sender or "Bilinmiyor", text)
+
+        except Exception as e:
+            raise e
 
     def stop(self):
         self.running = False
         if self._biriktiric:
             self._biriktiric.temizle()
+        try:
+            if self._driver:
+                self._driver.quit()
+        except: pass
+        self._driver = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -567,8 +411,7 @@ class MailOnizleme(ctk.CTkToplevel):
         cfg      = load_config()
         tarih    = datetime.now().strftime("%d.%m.%Y %H:%M")
         kw_str   = keywords[0] if keywords else kural_ad
-        mesaj    = (f"[{kw_str}] 34 ABC 123 plakalı araç kayıt yaptırmadı.\n"
-                    f"Sürücü bilgi vermeden ayrıldı.")
+        mesaj    = f"[{kw_str}] 34 ABC 123 plakalı araç kayıt yaptırmadı.\nSürücü bilgi vermeden ayrıldı."
         grup     = cfg.get("wa_group_name","Pregate Kayıt Red")
         from_acc = cfg.get("outlook_account","—")
 
@@ -577,7 +420,6 @@ class MailOnizleme(ctk.CTkToplevel):
         ctk.CTkLabel(hdr, text=f"✉  Mail Önizleme — {kural_ad}",
                      font=("Segoe UI",14,"bold"),
                      text_color=RENK_YAZI).pack(side="left", padx=16, pady=10)
-
         meta = ctk.CTkFrame(self, fg_color=RENK_KART, corner_radius=8)
         meta.pack(fill="x", padx=14, pady=(12,4))
         for lbl, val in [("Gönderen Hesap:", from_acc),
@@ -591,7 +433,6 @@ class MailOnizleme(ctk.CTkToplevel):
             ctk.CTkLabel(r, text=val, anchor="w", text_color=RENK_YAZI,
                          font=("Segoe UI",10), wraplength=400
                          ).pack(side="left", padx=(4,0))
-
         ctk.CTkLabel(self, text="MAİL İÇERİĞİ", font=("Segoe UI",10,"bold"),
                      text_color=RENK_YAZI2).pack(anchor="w", padx=14, pady=(8,2))
         txt = ctk.CTkTextbox(self, fg_color=RENK_KART, text_color=RENK_YAZI,
@@ -645,15 +486,15 @@ class AyarlarPencere(ctk.CTkToplevel):
         parent.configure(fg_color=RENK_PANEL)
         info = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         info.pack(fill="x", padx=10, pady=(10,6))
-        ctk.CTkLabel(info, text="WhatsApp Desktop Kurulumu",
-                     font=("Segoe UI",12,"bold"), text_color=RENK_YAZI
-                     ).pack(anchor="w", padx=14, pady=(12,6))
+        ctk.CTkLabel(info, text="WhatsApp Web Bağlantısı",
+                     font=("Segoe UI",12,"bold"),
+                     text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(12,6))
         for no, m in [
-            ("1","Microsoft Store → 'WhatsApp' indirin ve kurun."),
-            ("2","WhatsApp Desktop'ı açın ve telefonla QR ile giriş yapın."),
-            ("3","Aşağıya WhatsApp'taki grup adını AYNEN yazın."),
-            ("4","Bot arka planda çalışır — fareye/klavyeye dokunmaz."),
-            ("5","Aynı kişinin 2 dk içindeki mesajları tek mail olarak gönderilir."),
+            ("1","Başlat'a basın — Chrome otomatik açılır."),
+            ("2","İlk seferde QR taratın (WhatsApp → Bağlı Cihazlar → Cihaz Ekle)."),
+            ("3","Sonraki açılışlarda otomatik giriş yapar, QR sormaz."),
+            ("4","Chrome arka planda açık kalır — bot 10 sn'de bir mesaj okur."),
+            ("5","Aynı kişinin mesajları biriktirilerek tek mail olarak gönderilir."),
         ]:
             r = ctk.CTkFrame(info, fg_color=RENK_KART)
             r.pack(fill="x", padx=14, pady=3)
@@ -679,7 +520,6 @@ class AyarlarPencere(ctk.CTkToplevel):
                      text_color=RENK_YAZI2, font=("Segoe UI",9)
                      ).pack(anchor="w", padx=14, pady=(2,12))
 
-        # Bekleme süresi
         bf = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         bf.pack(fill="x", padx=10, pady=6)
         ctk.CTkLabel(bf, text="Mesaj Biriktirme Süresi",
@@ -688,13 +528,12 @@ class AyarlarPencere(ctk.CTkToplevel):
         row = ctk.CTkFrame(bf, fg_color=RENK_KART)
         row.pack(fill="x", padx=14, pady=(0,12))
         ctk.CTkLabel(row,
-                     text="Aynı kişinin mesajlarını şu kadar dk bekle ve tek mailde gönder:",
-                     text_color=RENK_YAZI2, font=("Segoe UI",10)
-                     ).pack(side="left")
+                     text="Aynı kişinin mesajlarını kaç dakika biriktir:",
+                     text_color=RENK_YAZI2, font=("Segoe UI",10)).pack(side="left")
         self.ent_sure = ctk.CTkEntry(row, width=60, fg_color=RENK_PANEL,
                                       border_color=RENK_VURGU,
                                       text_color=RENK_YAZI, font=("Segoe UI",11))
-        self.ent_sure.insert(0, str(load_config().get("bekleme_dk", 2)))
+        self.ent_sure.insert(0, str(load_config().get("bekleme_dk",2)))
         self.ent_sure.pack(side="left", padx=10)
         ctk.CTkLabel(row, text="dakika", text_color=RENK_YAZI2,
                      font=("Segoe UI",10)).pack(side="left")
@@ -731,14 +570,12 @@ class AyarlarPencere(ctk.CTkToplevel):
         body = ctk.CTkFrame(frame, fg_color=RENK_KART)
         body.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
         body.columnconfigure(1, weight=1)
-
         ctk.CTkLabel(body, text="Kural Adı:", text_color=RENK_YAZI2,
                      font=("Segoe UI",10)).grid(row=0,column=0,sticky="w")
         ent_ad = ctk.CTkEntry(body, fg_color=RENK_PANEL, border_color=renk,
                                text_color=RENK_YAZI, font=("Segoe UI",11,"bold"))
         ent_ad.insert(0, kural.get("ad",""))
         ent_ad.grid(row=0, column=1, sticky="ew", padx=(8,0))
-
         ctk.CTkLabel(body, text="Kelimeler\n(virgülle):", text_color=RENK_YAZI2,
                      font=("Segoe UI",10)).grid(row=1,column=0,sticky="w",pady=(8,0))
         ent_kw = ctk.CTkEntry(body, fg_color=RENK_PANEL, border_color=RENK_SINIR,
@@ -748,15 +585,12 @@ class AyarlarPencere(ctk.CTkToplevel):
         ctk.CTkLabel(body, text="💡 Büyük/küçük harf ayrımı yoktur.",
                      text_color=RENK_YAZI2, font=("Segoe UI",9)
                      ).grid(row=2, column=1, sticky="w", padx=(8,0), pady=(2,0))
-
         ml_hdr = ctk.CTkFrame(body, fg_color=RENK_KART)
         ml_hdr.grid(row=3,column=0,columnspan=2,sticky="ew",pady=(10,2))
         ctk.CTkLabel(ml_hdr, text="Mail Listesi:", text_color=RENK_YAZI2,
                      font=("Segoe UI",10)).pack(side="left")
-
         ml_frame = ctk.CTkFrame(body, fg_color=RENK_PANEL, corner_radius=6)
         ml_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
-
         def render_ml():
             for w in ml_frame.winfo_children(): w.destroy()
             for mail in kural.get("mail_list",[]):
@@ -773,8 +607,8 @@ class AyarlarPencere(ctk.CTkToplevel):
             add_r = ctk.CTkFrame(ml_frame, fg_color=RENK_PANEL)
             add_r.pack(fill="x", padx=4, pady=(2,4))
             ent_new = ctk.CTkEntry(add_r, fg_color=RENK_KART,
-                                    border_color=RENK_SINIR,
-                                    text_color=RENK_YAZI, font=("Segoe UI",10),
+                                    border_color=RENK_SINIR, text_color=RENK_YAZI,
+                                    font=("Segoe UI",10),
                                     placeholder_text="yeni@mail.com")
             ent_new.pack(side="left", fill="x", expand=True, padx=(4,4))
             def ekle(w=ent_new):
@@ -786,28 +620,26 @@ class AyarlarPencere(ctk.CTkToplevel):
                           font=("Segoe UI",10), command=ekle
                           ).pack(side="right", padx=(0,4))
         render_ml()
-
         btn_row = ctk.CTkFrame(body, fg_color=RENK_KART)
         btn_row.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8,0))
         ctk.CTkButton(btn_row, text="👁 Mail Önizle", width=110, height=26,
                       fg_color=RENK_VURGU2, hover_color=RENK_VURGU,
                       font=("Segoe UI",10),
                       command=lambda k=kural: MailOnizleme(
-                          self, k.get("ad","?"),
-                          k.get("mail_list",[]), k.get("keywords",[]))
+                          self,k.get("ad","?"),k.get("mail_list",[]),k.get("keywords",[]))
                       ).pack(side="left", padx=(0,6))
         ctk.CTkButton(btn_row, text="🗑 Sil", width=70, height=26,
                       fg_color=RENK_KIRMIZI, hover_color="#a93226",
                       font=("Segoe UI",10),
-                      command=lambda k=kural, f=frame: self._kural_sil(k,f)
+                      command=lambda k=kural,f=frame: self._kural_sil(k,f)
                       ).pack(side="left")
         return frame, ent_ad, ent_kw
 
     def _kural_ekle(self):
         cfg = load_config()
         cfg.setdefault("kurallar",[]).append({
-            "id": str(uuid.uuid4())[:8], "ad":"Yeni Kural",
-            "keywords":[], "mail_list":[]})
+            "id":str(uuid.uuid4())[:8],"ad":"Yeni Kural",
+            "keywords":[],"mail_list":[]})
         save_config(cfg); self._render_kurallar()
 
     def _kural_sil(self, kural, frame):
@@ -840,17 +672,18 @@ class AyarlarPencere(ctk.CTkToplevel):
                          text_color=RENK_YAZI2, font=("Segoe UI",9)
                          ).pack(anchor="w", padx=14, pady=(2,12))
         else:
-            ctk.CTkLabel(kart, text="⚠ Outlook açık değil veya hesap bulunamadı.",
+            ctk.CTkLabel(kart,
+                         text="⚠ Outlook açık değil veya hesap bulunamadı.",
                          text_color=RENK_SARI, font=("Segoe UI",11),
                          justify="left").pack(padx=14, pady=14, anchor="w")
             self.cmb_outlook = None
-
         test_k = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         test_k.pack(fill="x", padx=10, pady=(12,4))
-        ctk.CTkLabel(test_k, text="Bağlantı Testi", font=("Segoe UI",11,"bold"),
+        ctk.CTkLabel(test_k, text="Bağlantı Testi",
+                     font=("Segoe UI",11,"bold"),
                      text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(10,4))
-        self.lbl_test = ctk.CTkLabel(test_k, text="", font=("Segoe UI",10),
-                                      text_color=RENK_YESIL)
+        self.lbl_test = ctk.CTkLabel(test_k, text="",
+                                      font=("Segoe UI",10), text_color=RENK_YESIL)
         self.lbl_test.pack(anchor="w", padx=14)
         ctk.CTkButton(test_k, text="📧 Test Maili Gönder", height=32,
                       fg_color=RENK_VURGU, hover_color=RENK_VURGU2,
@@ -876,8 +709,7 @@ class AyarlarPencere(ctk.CTkToplevel):
     def _kaydet(self):
         cfg=load_config()
         cfg["wa_group_name"] = self.ent_grup.get().strip()
-        try:
-            cfg["bekleme_dk"] = max(1, int(self.ent_sure.get().strip()))
+        try: cfg["bekleme_dk"] = max(1,int(self.ent_sure.get().strip()))
         except: cfg["bekleme_dk"] = 2
         if hasattr(self,"cmb_outlook") and self.cmb_outlook:
             cfg["outlook_account"] = self.cmb_outlook.get().strip()
@@ -951,7 +783,8 @@ class RaporPencere(ctk.CTkToplevel):
     def _goster(self,yil,ay):
         rows,gunluk=db_rapor(yil,ay)
         for w in self.frm_ozet.winfo_children(): w.destroy()
-        t=len(rows); self._krt("Toplam Red",str(t),RENK_KIRMIZI)
+        t=len(rows)
+        self._krt("Toplam Red",str(t),RENK_KIRMIZI)
         gs=len(gunluk)
         self._krt("Günlük Ort.",str(round(t/gs,1) if gs else 0),RENK_SARI)
         if gunluk:
@@ -1072,9 +905,8 @@ class App(ctk.CTk):
             text=f"Grup: {cfg.get('wa_group_name','—')}",
             font=("Segoe UI",9),text_color=RENK_YAZI2,wraplength=170)
         self.lbl_grup.pack(padx=12,pady=(16,4),anchor="w")
-        dk=cfg.get("bekleme_dk",2)
         self.lbl_sure=ctk.CTkLabel(sol,
-            text=f"Biriktirme: {dk} dk",
+            text=f"Biriktirme: {cfg.get('bekleme_dk',2)} dk",
             font=("Segoe UI",9),text_color=RENK_YAZI2)
         self.lbl_sure.pack(padx=12,pady=(0,4),anchor="w")
 
@@ -1101,13 +933,10 @@ class App(ctk.CTk):
         self.btn_baslat.configure(state="disabled")
         self.btn_durdur.configure(state="normal")
         self._log("🚀 Bot başlatılıyor…")
-        # Bekleme süresini güncelle
-        global BEKLEME_SURE
-        BEKLEME_SURE = cfg.get("bekleme_dk", 2) * 60
         self.wa_bot=WABot(on_log=self._log,
                           on_status=self._set_durum_p,
                           on_message=self._on_mesaj_bitti)
-        threading.Thread(target=self.wa_bot.start, daemon=True).start()
+        threading.Thread(target=self.wa_bot.start,daemon=True).start()
 
     def _durdur(self):
         self.running=False
@@ -1119,7 +948,7 @@ class App(ctk.CTk):
 
     def _ayarlar(self):
         AyarlarPencere(self)
-        self.after(500, self._guncelle_labels)
+        self.after(500,self._guncelle_labels)
 
     def _guncelle_labels(self):
         cfg=load_config()
@@ -1128,36 +957,28 @@ class App(ctk.CTk):
 
     def _rapor(self): RaporPencere(self)
 
-    def _on_mesaj_bitti(self, gonderen, birlesik_metin):
-        """
-        Biriktiriciden gelen callback — 2 dk doldu, gönder.
-        birlesik_metin = kişinin 2 dk içinde attığı tüm mesajlar \n ile birleşik.
-        """
-        cfg = load_config()
-        metin_lower = birlesik_metin.lower()
-        eslesen = []
+    def _on_mesaj_bitti(self,gonderen,birlesik_metin):
+        cfg=load_config()
+        metin_lower=birlesik_metin.lower()
+        eslesen=[]
         for kural in cfg.get("kurallar",[]):
             for kw in kural.get("keywords",[]):
                 if kw.lower() in metin_lower:
                     eslesen.append(kural); break
-
         if not eslesen:
-            self._log(f"💬 [{gonderen}]: eşleşme yok — {birlesik_metin[:60]}")
+            self._log(f"💬 [{gonderen}]: eşleşme yok")
             return
-
-        from_acc = cfg.get("outlook_account","") or None
+        from_acc=cfg.get("outlook_account","") or None
         for kural in eslesen:
-            ml = kural.get("mail_list",[])
+            ml=kural.get("mail_list",[])
             if not ml:
                 self._log(f"⚠ '{kural.get('ad')}' mail listesi boş!"); continue
-            ok, info = send_mail(ml, kural["ad"], gonderen,
-                                 birlesik_metin, from_acc,
-                                 cfg.get("wa_group_name",""))
+            ok,info=send_mail(ml,kural["ad"],gonderen,birlesik_metin,
+                              from_acc,cfg.get("wa_group_name",""))
             if ok:
                 self.mail_say+=1
-                self.after(0, lambda: self.lbl_sayac.configure(
-                    text=str(self.mail_say)))
-                db_ekle(gonderen, kural["ad"], birlesik_metin, False)
+                self.after(0,lambda: self.lbl_sayac.configure(text=str(self.mail_say)))
+                db_ekle(gonderen,kural["ad"],birlesik_metin,False)
                 self._log(f"✉ [{kural['ad']}] {gonderen} → "
                           f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}")
             else:
