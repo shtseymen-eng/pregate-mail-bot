@@ -263,7 +263,7 @@ class WABot:
         self.on_message = on_message
         self.running    = False
         self._driver    = None
-        self._seen      = set()
+        self._seen      = {}   # msg_id -> timestamp
         self._biriktiric = None
 
     def start(self):
@@ -400,9 +400,15 @@ class WABot:
                 text    = m.get("text","").strip()
                 sender  = m.get("sender","Bilinmiyor").strip()
 
-                if not msg_id or msg_id in self._seen:
+                if not msg_id:
                     continue
-                self._seen.add(msg_id)
+                # 2 saatten eski seen kayıtlarını temizle
+                now_ts = time.time()
+                self._seen = {k:v for k,v in self._seen.items()
+                             if now_ts - v < 7200}
+                if msg_id in self._seen:
+                    continue
+                self._seen[msg_id] = now_ts
 
                 if not text:
                     continue
@@ -412,11 +418,17 @@ class WABot:
                     continue
                 # Anahtar kelime kontrolü — eşleşme yoksa biriktiriciye ekleme
                 cfg_check = load_config()
-                metin_l = text.lower()
+                # Türkçe karakter duyarsız karşılaştırma
+                metin_l = text.lower().replace("ı","i").replace("ğ","g")\
+                    .replace("ü","u").replace("ş","s").replace("ö","o")\
+                    .replace("ç","c")
                 eslesen_kw = False
                 for kural in cfg_check.get("kurallar",[]):
                     for kw in kural.get("keywords",[]):
-                        if kw.lower() in metin_l:
+                        kw_n = kw.lower().replace("ı","i").replace("ğ","g")\
+                            .replace("ü","u").replace("ş","s").replace("ö","o")\
+                            .replace("ç","c")
+                        if kw_n in metin_l:
                             eslesen_kw = True; break
                     if eslesen_kw: break
                 if not eslesen_kw:
@@ -999,11 +1011,15 @@ class App(ctk.CTk):
 
     def _on_mesaj_bitti(self,gonderen,birlesik_metin):
         cfg=load_config()
-        metin_lower=birlesik_metin.lower()
+        def norm(s):
+            return s.lower().replace("ı","i").replace("ğ","g")\
+                .replace("ü","u").replace("ş","s").replace("ö","o")\
+                .replace("ç","c")
+        metin_lower = norm(birlesik_metin)
         eslesen=[]
         for kural in cfg.get("kurallar",[]):
             for kw in kural.get("keywords",[]):
-                if kw.lower() in metin_lower:
+                if norm(kw) in metin_lower:
                     eslesen.append(kural); break
         if not eslesen:
             self._log(f"💬 [{gonderen}]: eşleşme yok")
