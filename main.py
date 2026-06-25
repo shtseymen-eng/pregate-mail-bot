@@ -1,16 +1,11 @@
 import customtkinter as ctk
 import threading
-import json
-import os
-import sys
-import time
-import glob
+import json, os, sys, time, glob, uuid, tempfile
 import sqlite3 as _sqlite3
-import uuid
-import tempfile
 from datetime import datetime
 from tkinter import messagebox, ttk
 import tkinter as tk
+from collections import defaultdict
 
 try:
     from PIL import Image, ImageTk
@@ -25,7 +20,7 @@ except ImportError:
     OUTLOOK_OK = False
 
 try:
-    import win32gui, win32con, win32api
+    import win32gui, win32con
     WIN32_OK = True
 except ImportError:
     WIN32_OK = False
@@ -47,7 +42,6 @@ RENKLER       = ["#1a6ea8", "#1db954", "#9b59b6", "#e67e22"]
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# ── Yollar ──────────────────────────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -56,20 +50,21 @@ else:
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 DB_FILE     = os.path.join(BASE_DIR, "kayitlar.db")
 
+BEKLEME_SURE = 120   # saniye — aynı kişiden mesaj toplama süresi
+
 # ── Config ──────────────────────────────────────────────────────────────────
 def load_config():
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
-        return {"wa_group_name": "Pregate Kayıt Red",
-                "outlook_account": "", "kurallar": []}
+        return {"wa_group_name":"Pregate Kayıt Red","outlook_account":"","kurallar":[]}
 
 def save_config(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-# ── Uygulama DB ─────────────────────────────────────────────────────────────
+# ── Kayıt DB ────────────────────────────────────────────────────────────────
 def db_init():
     con = _sqlite3.connect(DB_FILE)
     con.execute("""CREATE TABLE IF NOT EXISTS kayitlar (
@@ -86,13 +81,13 @@ def db_ekle(gonderen, kural_ad, mesaj, resim_var):
 
 def db_rapor(yil, ay):
     con = _sqlite3.connect(DB_FILE)
-    prefix = f"{yil:04d}-{ay:02d}"
     rows = con.execute(
         "SELECT tarih,gonderen,kural_ad,mesaj,resim_var FROM kayitlar "
-        "WHERE tarih LIKE ? ORDER BY tarih", (prefix+"%",)).fetchall()
+        "WHERE tarih LIKE ? ORDER BY tarih",
+        (f"{yil:04d}-{ay:02d}%",)).fetchall()
     gunluk = {}
     for r in rows:
-        gun = r[0][:10]; gunluk[gun] = gunluk.get(gun,0)+1
+        g = r[0][:10]; gunluk[g] = gunluk.get(g,0)+1
     con.close()
     return rows, gunluk
 
@@ -101,7 +96,7 @@ def outlook_hesaplari():
     if not OUTLOOK_OK: return []
     try:
         ol = win32com.client.Dispatch("Outlook.Application")
-        return [acc.SmtpAddress for acc in ol.GetNamespace("MAPI").Accounts]
+        return [a.SmtpAddress for a in ol.GetNamespace("MAPI").Accounts]
     except: return []
 
 MAIL_SABLON = """\
@@ -116,7 +111,7 @@ Grup      : {grup}
 Tarih     : {tarih}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Araç Bilgisi / Açıklama:
+Mesaj İçeriği:
 {mesaj}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -127,8 +122,7 @@ Saygılarımızla,
 Pregate Araç Kontrol Sistemi
 """
 
-def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths,
-              grup_adi, from_account=None):
+def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi):
     if not OUTLOOK_OK: return False, "pywin32 yüklü değil"
     try:
         tarih = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -137,7 +131,7 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths,
         mail.Subject = f"[KAYIT RED] {kural_ad} – {tarih}"
         mail.Body    = MAIL_SABLON.format(
             tarih=tarih, gonderen=gonderen,
-            grup=grup_adi, mesaj=mesaj or "(Mesaj yok)")
+            grup=grup_adi, mesaj=mesaj)
         mail.To = "; ".join(mail_list)
         if from_account:
             try:
@@ -145,232 +139,286 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths,
                     if acc.SmtpAddress.lower() == from_account.lower():
                         mail.SendUsingAccount = acc; break
             except: pass
-        for p in img_paths:
-            if os.path.exists(p): mail.Attachments.Add(p)
         mail.Send()
         return True, "OK"
     except Exception as e:
         return False, str(e)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WHATSAPP DESKTOP DB OKUYUCU
-# Fare/klavyeye dokunmaz. WA Desktop DB'sini arka planda okur.
+# MESAJ BİRİKTİRİCİ — aynı kişiden 2 dk içinde gelen mesajları toplar
+# ══════════════════════════════════════════════════════════════════════════════
+class MesajBiriktiric:
+    def __init__(self, on_gonder, bekleme=BEKLEME_SURE):
+        self.on_gonder  = on_gonder   # (gonderen, birlesik_metin) callback
+        self.bekleme    = bekleme
+        self._kuyruk    = {}          # gonderen → {"metinler":[], "timer":Timer}
+        self._lock      = threading.Lock()
+
+    def ekle(self, gonderen, metin):
+        """Yeni mesaj geldi — biriktiriciye ekle, timer sıfırla."""
+        with self._lock:
+            if gonderen not in self._kuyruk:
+                self._kuyruk[gonderen] = {"metinler": [], "timer": None}
+
+            self._kuyruk[gonderen]["metinler"].append(metin)
+
+            # Varolan timer'ı iptal et
+            t = self._kuyruk[gonderen]["timer"]
+            if t: t.cancel()
+
+            # Yeni timer — 2 dk sonra gönder
+            yeni_t = threading.Timer(
+                self.bekleme,
+                self._gonder,
+                args=[gonderen])
+            yeni_t.daemon = True
+            yeni_t.start()
+            self._kuyruk[gonderen]["timer"] = yeni_t
+
+    def _gonder(self, gonderen):
+        """2 dk doldu — biriken mesajları gönder."""
+        with self._lock:
+            if gonderen not in self._kuyruk:
+                return
+            metinler = self._kuyruk.pop(gonderen)["metinler"]
+
+        if metinler:
+            birlesik = "\n".join(metinler)
+            self.on_gonder(gonderen, birlesik)
+
+    def temizle(self):
+        with self._lock:
+            for v in self._kuyruk.values():
+                if v["timer"]: v["timer"].cancel()
+            self._kuyruk.clear()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WHATSAPP DB OKUYUCU
 # ══════════════════════════════════════════════════════════════════════════════
 class WABot:
-    # WA Desktop mesaj DB yolları
     WA_DB_PATTERNS = [
-        os.path.expandvars(
-            r"%LOCALAPPDATA%\Packages\5319275A.WhatsApp_cv1g1gvanyjgm\LocalState\messages.db"),
-        os.path.expandvars(
-            r"%LOCALAPPDATA%\WhatsApp\messages.db"),
-        os.path.expandvars(
-            r"%APPDATA%\WhatsApp\messages.db"),
+        r"%LOCALAPPDATA%\Packages\5319275A.WhatsApp_cv1g1gvanyjgm\LocalState\messages.db",
+        r"%LOCALAPPDATA%\Packages\5319275A.WhatsApp_cv1g1gvanyjgm\LocalState\default\messages.db",
+        r"%LOCALAPPDATA%\WhatsApp\messages.db",
+        r"%APPDATA%\WhatsApp\messages.db",
+        r"%USERPROFILE%\AppData\Local\WhatsApp\messages.db",
     ]
 
     def __init__(self, on_log, on_status, on_message):
-        self.on_log     = on_log
-        self.on_status  = on_status
-        self.on_message = on_message
-        self.running    = False
-        self._son_id    = 0       # en son işlenen mesaj id'si
-        self._wa_db     = None    # bulunan DB yolu
+        self.on_log      = on_log
+        self.on_status   = on_status
+        self.on_message  = on_message   # (gonderen, metin_birikik) — 2dk sonra tetiklenir
+        self.running     = False
+        self._son_id     = 0
+        self._wa_db      = None
+        self._tablo      = None    # hangi tablo kullanılıyor
+        self._kolon_map  = {}      # sütun isimleri haritası
+        self._biriktiric = None
 
     def start(self):
         self.running = True
-        self.on_status("START","● Başlatılıyor…", RENK_SARI)
+        self.on_status("START", "● Başlatılıyor…", RENK_SARI)
+        self._biriktiric = MesajBiriktiric(
+            on_gonder=self.on_message,
+            bekleme=BEKLEME_SURE)
 
-        # WA DB bul
-        db_yolu = self._wa_db_bul()
-        if db_yolu:
-            self._wa_db = db_yolu
-            self.on_log(f"✅ WhatsApp Desktop DB bulundu.")
-            self.on_log("📋 Mesajlar DB üzerinden izleniyor (fare/klavye kullanılmıyor).")
-            self._son_id = self._son_mesaj_id()
-            self.on_status("OK","● Çalışıyor ✓", RENK_YESIL)
-            self._dinle_db()
+        db = self._wa_db_bul()
+        if db:
+            self._wa_db = db
+            self.on_log(f"✅ WhatsApp DB bulundu: {os.path.basename(os.path.dirname(db))}")
+            self._db_kesfet()
+            self._son_id = self._son_id_al()
+            self.on_log(f"📌 Başlangıç mesaj ID: {self._son_id}")
+            self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
+            self._dinle()
         else:
-            # DB bulunamadı — bildirim yöntemiyle dene
             self.on_log("⚠ WhatsApp Desktop DB bulunamadı.")
-            self.on_log("🔄 Windows bildirim yöntemi deneniyor…")
-            self.on_status("WARN","● Bildirim Modu", RENK_SARI)
-            self._dinle_bildirim()
+            self.on_log("   → Microsoft Store'dan WhatsApp indirin ve açın.")
+            self.on_log("   → Bir mesaj alındıktan sonra tekrar başlatın.")
+            self.on_status("WARN", "● DB Bulunamadı", RENK_KIRMIZI)
+            # 60 sn'de bir tekrar dene
+            while self.running:
+                time.sleep(60)
+                db = self._wa_db_bul()
+                if db:
+                    self._wa_db = db
+                    self.on_log("✅ DB bulundu, başlatılıyor…")
+                    self._db_kesfet()
+                    self._son_id = self._son_id_al()
+                    self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
+                    self._dinle()
+                    return
 
     def _wa_db_bul(self):
-        """WhatsApp Desktop mesaj veritabanını bul."""
-        for pattern in self.WA_DB_PATTERNS:
-            if os.path.exists(pattern):
-                return pattern
-        # Wildcard ile ara
-        appdata = os.environ.get("LOCALAPPDATA","")
+        # Doğrudan yollar
+        for p in self.WA_DB_PATTERNS:
+            expanded = os.path.expandvars(p)
+            if os.path.exists(expanded):
+                return expanded
+        # Wildcard arama
+        appdata = os.environ.get("LOCALAPPDATA", "")
         for pat in [
-            os.path.join(appdata,"Packages","5319275A.WhatsApp*",
-                         "LocalState","messages.db"),
-            os.path.join(appdata,"Packages","5319275A.WhatsApp*",
-                         "LocalCache","Roaming","WhatsApp","messages.db"),
+            os.path.join(appdata, "Packages", "5319275A.WhatsApp*",
+                         "LocalState", "messages.db"),
+            os.path.join(appdata, "Packages", "5319275A.WhatsApp*",
+                         "LocalState", "*", "messages.db"),
+            os.path.join(appdata, "Packages", "5319275A.WhatsApp*",
+                         "LocalCache", "Roaming", "WhatsApp", "messages.db"),
         ]:
             found = glob.glob(pat)
-            if found: return found[0]
+            if found:
+                return found[0]
         return None
 
-    def _son_mesaj_id(self):
-        """DB'deki en son mesaj ID'sini al — başlangıç noktası."""
+    def _db_kesfet(self):
+        """DB şemasını keşfet — tablo ve sütun isimlerini bul."""
         try:
-            con = _sqlite3.connect(f"file:{self._wa_db}?mode=ro", uri=True,
-                                   timeout=3)
+            con = _sqlite3.connect(
+                f"file:{self._wa_db}?mode=ro&nolock=1", uri=True, timeout=5)
             cur = con.cursor()
-            # Tablo adını bul
+
             tabloler = [r[0] for r in cur.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-            con.close()
+            self.on_log(f"📊 DB tabloları: {', '.join(tabloler)}")
 
-            # messages veya message tablosunu bul
-            for tbl in ["messages","message","msgs"]:
+            # Mesaj tablosunu bul
+            for tbl in ["messages", "message", "msgs", "chat_messages"]:
                 if tbl in tabloler:
-                    con = _sqlite3.connect(
-                        f"file:{self._wa_db}?mode=ro", uri=True, timeout=3)
-                    row = con.execute(
-                        f"SELECT MAX(rowid) FROM {tbl}").fetchone()
-                    con.close()
-                    return row[0] if row and row[0] else 0
-        except Exception as e:
-            self.on_log(f"⚠ DB başlangıç ID hatası: {e}")
-        return 0
+                    self._tablo = tbl
+                    break
 
-    def _dinle_db(self):
-        """DB'yi 10 sn'de bir kontrol et — fareye dokunmaz."""
+            if not self._tablo and tabloler:
+                # En fazla satırı olan tabloyu seç
+                max_count = 0
+                for tbl in tabloler:
+                    try:
+                        c = cur.execute(f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]
+                        if c > max_count:
+                            max_count = c; self._tablo = tbl
+                    except: pass
+
+            if self._tablo:
+                cols = [r[1] for r in cur.execute(
+                    f"PRAGMA table_info([{self._tablo}])").fetchall()]
+                self.on_log(f"📋 Tablo: {self._tablo} | Sütunlar: {', '.join(cols)}")
+                self._kolon_map = self._sütun_haritasi(cols)
+                self.on_log(f"🗺 Harita: {self._kolon_map}")
+            else:
+                self.on_log("⚠ Mesaj tablosu bulunamadı!")
+            con.close()
+        except Exception as e:
+            self.on_log(f"⚠ DB keşif hatası: {e}")
+
+    def _sütun_haritasi(self, cols):
+        """Sütun isimlerini standart isimlere eşle."""
+        cols_lower = {c.lower(): c for c in cols}
+        harita = {}
+
+        # Chat/grup alanı
+        for c in ["chat_jid","chat_id","chatid","jid","remote_jid","remotejid",
+                  "conversation_jid","group_jid","thread_id"]:
+            if c in cols_lower:
+                harita["chat"] = cols_lower[c]; break
+
+        # Gönderen
+        for c in ["sender","sender_jid","from","participant","push_name",
+                  "pushname","author","notify_name","notifyname","name"]:
+            if c in cols_lower:
+                harita["sender"] = cols_lower[c]; break
+
+        # Metin
+        for c in ["text","body","message","content","message_text",
+                  "messagetext","data","msg","text_data"]:
+            if c in cols_lower:
+                harita["text"] = cols_lower[c]; break
+
+        # Zaman
+        for c in ["timestamp","time","date","created_at","message_timestamp",
+                  "sent_at","received_at"]:
+            if c in cols_lower:
+                harita["time"] = cols_lower[c]; break
+
+        return harita
+
+    def _son_id_al(self):
+        if not self._tablo: return 0
+        try:
+            con = _sqlite3.connect(
+                f"file:{self._wa_db}?mode=ro&nolock=1", uri=True, timeout=5)
+            row = con.execute(
+                f"SELECT MAX(rowid) FROM [{self._tablo}]").fetchone()
+            con.close()
+            return row[0] if row and row[0] else 0
+        except: return 0
+
+    def _dinle(self):
+        """10 sn'de bir DB kontrol et."""
         cfg = load_config()
-        grup = cfg.get("wa_group_name","").strip().lower()
+        hedef = cfg.get("wa_group_name","").strip().lower()
 
         while self.running:
             try:
-                self._db_kontrol(grup)
+                self._kontrol(hedef)
             except Exception as e:
-                self.on_log(f"⚠ DB okuma hatası: {e}")
+                self.on_log(f"⚠ Kontrol hatası: {e}")
             time.sleep(10)
 
-    def _db_kontrol(self, hedef_grup):
-        """Yeni mesajları DB'den oku."""
+    def _kontrol(self, hedef_grup):
+        if not self._tablo: return
         try:
             con = _sqlite3.connect(
-                f"file:{self._wa_db}?mode=ro", uri=True, timeout=3)
+                f"file:{self._wa_db}?mode=ro&nolock=1", uri=True, timeout=5)
             con.row_factory = _sqlite3.Row
             cur = con.cursor()
 
-            # Tabloları keşfet
-            tabloler = {r[0] for r in cur.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-
-            # WhatsApp Desktop DB şeması
-            if "messages" in tabloler:
-                self._oku_messages(cur, hedef_grup)
-            elif "message" in tabloler:
-                self._oku_message(cur, hedef_grup)
-            else:
-                # Tüm tabloları logla (ilk kez)
-                if not hasattr(self, '_tablo_logged'):
-                    self._tablo_logged = True
-                    self.on_log(f"📊 DB tabloları: {', '.join(tabloler)}")
+            rows = cur.execute(
+                f"SELECT rowid,* FROM [{self._tablo}] "
+                f"WHERE rowid > ? ORDER BY rowid",
+                (self._son_id,)).fetchall()
             con.close()
-        except _sqlite3.OperationalError as e:
-            if "readonly" not in str(e).lower():
-                raise
 
-    def _oku_messages(self, cur, hedef_grup):
-        """messages tablosundan yeni mesajları oku."""
-        try:
-            # Sütunları keşfet
-            cols = {r[1] for r in cur.execute(
-                "PRAGMA table_info(messages)").fetchall()}
-
-            # Yeni mesajlar
-            rows = cur.execute(
-                "SELECT rowid,* FROM messages WHERE rowid > ? "
-                "ORDER BY rowid", (self._son_id,)).fetchall()
-
-            for row in rows:
-                self._son_id = max(self._son_id, row["rowid"])
-                # Grup adı kontrolü
-                chat = ""
-                for col in ["chat_id","chatId","jid","remoteJid",
-                            "conversation_jid"]:
-                    try: chat = str(row[col] or ""); break
-                    except: pass
-
-                # Gönderen
-                sender = ""
-                for col in ["sender","from","participant","pushName",
-                            "author","notifyName"]:
-                    try: sender = str(row[col] or ""); break
-                    except: pass
-
-                # Metin
-                text = ""
-                for col in ["text","body","message","content",
-                            "messageText","data"]:
-                    try:
-                        val = row[col]
-                        if val and isinstance(val, str):
-                            text = val; break
-                    except: pass
-
-                # Grup eşleşmesi
-                if hedef_grup and hedef_grup not in chat.lower():
-                    continue
-
-                if text:
-                    self.on_message(sender or "Bilinmiyor", text, [])
-        except Exception as e:
-            self.on_log(f"⚠ messages okuma: {e}")
-
-    def _oku_message(self, cur, hedef_grup):
-        """message tablosundan yeni mesajları oku."""
-        try:
-            rows = cur.execute(
-                "SELECT rowid,* FROM message WHERE rowid > ? "
-                "ORDER BY rowid", (self._son_id,)).fetchall()
             for row in rows:
                 self._son_id = max(self._son_id, row["rowid"])
                 d = dict(row)
-                chat   = str(d.get("chat_jid") or d.get("chatId") or "")
-                sender = str(d.get("sender_jid") or d.get("sender") or
-                             d.get("pushName") or "Bilinmiyor")
-                text   = str(d.get("text") or d.get("body") or
-                             d.get("data") or "")
-                if hedef_grup and hedef_grup not in chat.lower():
+
+                # Sütun haritasını kullan
+                chat   = str(d.get(self._kolon_map.get("chat",""), "") or "").lower()
+                sender = str(d.get(self._kolon_map.get("sender",""), "") or "Bilinmiyor")
+                text   = str(d.get(self._kolon_map.get("text",""), "") or "")
+
+                # Eğer harita boşsa tüm string sütunlara bak
+                if not self._kolon_map.get("text"):
+                    for k, v in d.items():
+                        if isinstance(v, str) and len(v) > 2 and k not in (
+                                "rowid","id","key_id","_id"):
+                            text = v; break
+
+                # Grup filtresi
+                if hedef_grup and hedef_grup not in chat:
+                    # Chat alanı boşsa yine de işle (bazı DB'lerde join gerekir)
+                    if chat:
+                        continue
+
+                # Sistem mesajlarını atla
+                if not text or text in ("null","None",""):
                     continue
-                if text:
-                    self.on_message(sender, text, [])
-        except Exception as e:
-            self.on_log(f"⚠ message okuma: {e}")
 
-    # ── DB bulunamazsa bekleme modu ─────────────────────────────────────────
-    def _dinle_bildirim(self):
-        """
-        WA Desktop DB bulunamazsa kullanıcıyı bilgilendir ve bekleme moduna gir.
-        Hiçbir harici process açmaz.
-        """
-        self.on_log("⚠ WhatsApp Desktop veritabanı bulunamadı.")
-        self.on_log("📋 Lütfen şunları kontrol edin:")
-        self.on_log("   1. WhatsApp Desktop (Microsoft Store) kurulu mu?")
-        self.on_log("   2. WhatsApp Desktop açık ve giriş yapılmış mı?")
-        self.on_log("   3. En az 1 mesaj alınmış mı? (DB oluşması için)")
-        self.on_log("🔄 60 sn sonra tekrar denenecek…")
-        self.on_status("WARN", "● DB Bekleniyor", RENK_SARI)
+                # Kendi telefon numarasını gönderen göster
+                sender_clean = sender.split("@")[0] if "@" in sender else sender
 
-        while self.running:
-            time.sleep(60)
-            db_yolu = self._wa_db_bul()
-            if db_yolu:
-                self._wa_db = db_yolu
-                self.on_log("✅ WhatsApp Desktop DB bulundu! Mesajlar izleniyor…")
-                self._son_id = self._son_mesaj_id()
-                self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
-                self._dinle_db()
-                return
-            self.on_log("⏳ DB henüz yok, tekrar bekleniyor…")
+                self.on_log(f"📩 [{sender_clean}]: {text[:60]}")
+                self._biriktiric.ekle(sender_clean, text)
+
+        except _sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() or "readonly" in str(e).lower():
+                pass  # WA DB kilitli olabilir, geç
+            else:
+                raise
 
     def stop(self):
         self.running = False
+        if self._biriktiric:
+            self._biriktiric.temizle()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -383,12 +431,11 @@ class MailOnizleme(ctk.CTkToplevel):
         self.geometry("620x520")
         self.configure(fg_color=RENK_ANA_ARKA)
         self.grab_set()
-
         cfg      = load_config()
         tarih    = datetime.now().strftime("%d.%m.%Y %H:%M")
-        gonderen = "Ahmet Yılmaz"
         kw_str   = keywords[0] if keywords else kural_ad
-        mesaj    = f"[{kw_str}] 34 ABC 123 plakalı araç kayıt yaptırmadı."
+        mesaj    = (f"[{kw_str}] 34 ABC 123 plakalı araç kayıt yaptırmadı.\n"
+                    f"Sürücü bilgi vermeden ayrıldı.")
         grup     = cfg.get("wa_group_name","Pregate Kayıt Red")
         from_acc = cfg.get("outlook_account","—")
 
@@ -403,22 +450,22 @@ class MailOnizleme(ctk.CTkToplevel):
         for lbl, val in [("Gönderen Hesap:", from_acc),
                          ("Konu:", f"[KAYIT RED] {kural_ad} – {tarih}"),
                          ("Alıcılar:", ", ".join(mail_list) if mail_list else "—")]:
-            row = ctk.CTkFrame(meta, fg_color=RENK_KART)
-            row.pack(fill="x", padx=10, pady=3)
-            ctk.CTkLabel(row, text=lbl, width=130, anchor="w",
+            r = ctk.CTkFrame(meta, fg_color=RENK_KART)
+            r.pack(fill="x", padx=10, pady=3)
+            ctk.CTkLabel(r, text=lbl, width=130, anchor="w",
                          text_color=RENK_YAZI2,
                          font=("Segoe UI",10,"bold")).pack(side="left")
-            ctk.CTkLabel(row, text=val, anchor="w",
-                         text_color=RENK_YAZI, font=("Segoe UI",10),
-                         wraplength=400).pack(side="left", padx=(4,0))
+            ctk.CTkLabel(r, text=val, anchor="w", text_color=RENK_YAZI,
+                         font=("Segoe UI",10), wraplength=400
+                         ).pack(side="left", padx=(4,0))
 
         ctk.CTkLabel(self, text="MAİL İÇERİĞİ", font=("Segoe UI",10,"bold"),
                      text_color=RENK_YAZI2).pack(anchor="w", padx=14, pady=(8,2))
         txt = ctk.CTkTextbox(self, fg_color=RENK_KART, text_color=RENK_YAZI,
                               font=("Consolas",10), corner_radius=8)
         txt.pack(fill="both", expand=True, padx=14, pady=(0,8))
-        txt.insert("end", MAIL_SABLON.format(tarih=tarih, gonderen=gonderen,
-                                              grup=grup, mesaj=mesaj))
+        txt.insert("end", MAIL_SABLON.format(
+            tarih=tarih, gonderen="Ahmet Yılmaz", grup=grup, mesaj=mesaj))
         txt.configure(state="disabled")
         ctk.CTkLabel(self, text="⚠ Örnek önizlemedir.",
                      font=("Segoe UI",9), text_color=RENK_SARI).pack(pady=(0,4))
@@ -433,36 +480,29 @@ class MailOnizleme(ctk.CTkToplevel):
 class AyarlarPencere(ctk.CTkToplevel):
     def __init__(self, master):
         super().__init__(master)
-        self.title("Ayarlar")
-        self.geometry("780x660")
-        self.minsize(700,580)
-        self.configure(fg_color=RENK_ANA_ARKA)
-        self.grab_set()
-        self._kart_list = []
-        self._build()
+        self.title("Ayarlar"); self.geometry("780x680")
+        self.minsize(700,580); self.configure(fg_color=RENK_ANA_ARKA)
+        self.grab_set(); self._kart_list = []; self._build()
 
     def _build(self):
         hdr = ctk.CTkFrame(self, fg_color=RENK_PANEL, height=52, corner_radius=0)
         hdr.pack(fill="x"); hdr.pack_propagate(False)
         ctk.CTkLabel(hdr, text="⚙  Ayarlar", font=("Segoe UI",16,"bold"),
                      text_color=RENK_YAZI).pack(side="left", padx=16, pady=12)
-
         self.tab = ctk.CTkTabview(self, fg_color=RENK_PANEL,
-                                   segmented_button_fg_color=RENK_KART,
-                                   segmented_button_selected_color=RENK_VURGU,
-                                   segmented_button_selected_hover_color=RENK_VURGU2,
-                                   segmented_button_unselected_color=RENK_KART,
-                                   segmented_button_unselected_hover_color=RENK_SINIR,
-                                   text_color=RENK_YAZI, corner_radius=10)
+            segmented_button_fg_color=RENK_KART,
+            segmented_button_selected_color=RENK_VURGU,
+            segmented_button_selected_hover_color=RENK_VURGU2,
+            segmented_button_unselected_color=RENK_KART,
+            segmented_button_unselected_hover_color=RENK_SINIR,
+            text_color=RENK_YAZI, corner_radius=10)
         self.tab.pack(fill="both", expand=True, padx=14, pady=(8,4))
         self.tab.add("📱  WhatsApp")
         self.tab.add("🔑  Kurallar")
         self.tab.add("✉   Outlook")
-
         self._build_wa(self.tab.tab("📱  WhatsApp"))
         self._build_kurallar(self.tab.tab("🔑  Kurallar"))
         self._build_outlook(self.tab.tab("✉   Outlook"))
-
         ctk.CTkButton(self, text="💾  Kaydet & Kapat",
                       fg_color=RENK_YESIL, hover_color="#17a844",
                       font=("Segoe UI",13,"bold"), height=42,
@@ -473,14 +513,14 @@ class AyarlarPencere(ctk.CTkToplevel):
         info = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         info.pack(fill="x", padx=10, pady=(10,6))
         ctk.CTkLabel(info, text="WhatsApp Desktop Kurulumu",
-                     font=("Segoe UI",12,"bold"),
-                     text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(12,6))
+                     font=("Segoe UI",12,"bold"), text_color=RENK_YAZI
+                     ).pack(anchor="w", padx=14, pady=(12,6))
         for no, m in [
-            ("1","Microsoft Store'dan 'WhatsApp' indirin ve kurun."),
+            ("1","Microsoft Store → 'WhatsApp' indirin ve kurun."),
             ("2","WhatsApp Desktop'ı açın ve telefonla QR ile giriş yapın."),
             ("3","Aşağıya WhatsApp'taki grup adını AYNEN yazın."),
             ("4","Bot arka planda çalışır — fareye/klavyeye dokunmaz."),
-            ("5","Program WhatsApp'ın veritabanını 10 sn'de bir kontrol eder."),
+            ("5","Aynı kişinin 2 dk içindeki mesajları tek mail olarak gönderilir."),
         ]:
             r = ctk.CTkFrame(info, fg_color=RENK_KART)
             r.pack(fill="x", padx=14, pady=3)
@@ -502,10 +542,29 @@ class AyarlarPencere(ctk.CTkToplevel):
                                       placeholder_text="örn: Pregate Kayıt Red")
         self.ent_grup.insert(0, load_config().get("wa_group_name",""))
         self.ent_grup.pack(fill="x", padx=14, pady=(0,4))
-        ctk.CTkLabel(gf,
-                     text="💡 Grup adı WhatsApp'takiyle birebir aynı olmalı.",
+        ctk.CTkLabel(gf, text="💡 Grup adı WhatsApp'takiyle birebir aynı olmalı.",
                      text_color=RENK_YAZI2, font=("Segoe UI",9)
                      ).pack(anchor="w", padx=14, pady=(2,12))
+
+        # Bekleme süresi
+        bf = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
+        bf.pack(fill="x", padx=10, pady=6)
+        ctk.CTkLabel(bf, text="Mesaj Biriktirme Süresi",
+                     font=("Segoe UI",12,"bold"),
+                     text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(12,4))
+        row = ctk.CTkFrame(bf, fg_color=RENK_KART)
+        row.pack(fill="x", padx=14, pady=(0,12))
+        ctk.CTkLabel(row,
+                     text="Aynı kişinin mesajlarını şu kadar dk bekle ve tek mailde gönder:",
+                     text_color=RENK_YAZI2, font=("Segoe UI",10)
+                     ).pack(side="left")
+        self.ent_sure = ctk.CTkEntry(row, width=60, fg_color=RENK_PANEL,
+                                      border_color=RENK_VURGU,
+                                      text_color=RENK_YAZI, font=("Segoe UI",11))
+        self.ent_sure.insert(0, str(load_config().get("bekleme_dk", 2)))
+        self.ent_sure.pack(side="left", padx=10)
+        ctk.CTkLabel(row, text="dakika", text_color=RENK_YAZI2,
+                     font=("Segoe UI",10)).pack(side="left")
 
     def _build_kurallar(self, parent):
         parent.configure(fg_color=RENK_PANEL)
@@ -523,14 +582,13 @@ class AyarlarPencere(ctk.CTkToplevel):
         self._render_kurallar()
 
     def _render_kurallar(self):
-        for item in self._kart_list:
-            item[0].destroy()
+        for item in self._kart_list: item[0].destroy()
         self._kart_list.clear()
-        for i, kural in enumerate(load_config().get("kurallar",[])):
+        for i, k in enumerate(load_config().get("kurallar",[])):
             renk = RENKLER[i % len(RENKLER)]
-            kart, ea, ek = self._kural_kart(self.scroll, kural, renk)
+            kart, ea, ek = self._kural_kart(self.scroll, k, renk)
             kart.grid(row=i, column=0, sticky="ew", pady=(0,10))
-            self._kart_list.append((kart, kural, ea, ek))
+            self._kart_list.append((kart, k, ea, ek))
 
     def _kural_kart(self, parent, kural, renk):
         frame = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
@@ -602,8 +660,8 @@ class AyarlarPencere(ctk.CTkToplevel):
                       fg_color=RENK_VURGU2, hover_color=RENK_VURGU,
                       font=("Segoe UI",10),
                       command=lambda k=kural: MailOnizleme(
-                          self,k.get("ad","?"),
-                          k.get("mail_list",[]),k.get("keywords",[]))
+                          self, k.get("ad","?"),
+                          k.get("mail_list",[]), k.get("keywords",[]))
                       ).pack(side="left", padx=(0,6))
         ctk.CTkButton(btn_row, text="🗑 Sil", width=70, height=26,
                       fg_color=RENK_KIRMIZI, hover_color="#a93226",
@@ -614,9 +672,9 @@ class AyarlarPencere(ctk.CTkToplevel):
 
     def _kural_ekle(self):
         cfg = load_config()
-        yeni = {"id":str(uuid.uuid4())[:8],"ad":"Yeni Kural",
-                "keywords":[],"mail_list":[]}
-        cfg.setdefault("kurallar",[]).append(yeni)
+        cfg.setdefault("kurallar",[]).append({
+            "id": str(uuid.uuid4())[:8], "ad":"Yeni Kural",
+            "keywords":[], "mail_list":[]})
         save_config(cfg); self._render_kurallar()
 
     def _kural_sil(self, kural, frame):
@@ -633,12 +691,10 @@ class AyarlarPencere(ctk.CTkToplevel):
                      text_color=RENK_YAZI).pack(anchor="w", padx=10, pady=(12,4))
         kart = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         kart.pack(fill="x", padx=10, pady=4)
-        cfg = load_config()
-        secili = cfg.get("outlook_account","")
-        hesaplar = outlook_hesaplari()
+        cfg=load_config(); secili=cfg.get("outlook_account","")
+        hesaplar=outlook_hesaplari()
         if hesaplar:
-            ctk.CTkLabel(kart,
-                         text="Hangi hesaptan mail gönderileceğini seçin:",
+            ctk.CTkLabel(kart, text="Hangi hesaptan mail gönderileceğini seçin:",
                          text_color=RENK_YAZI2, font=("Segoe UI",10)
                          ).pack(anchor="w", padx=14, pady=(12,6))
             self.cmb_outlook = ctk.CTkComboBox(
@@ -647,41 +703,37 @@ class AyarlarPencere(ctk.CTkToplevel):
                 text_color=RENK_YAZI, font=("Segoe UI",11), width=420)
             self.cmb_outlook.set(secili if secili in hesaplar else hesaplar[0])
             self.cmb_outlook.pack(padx=14, pady=(0,4), anchor="w")
-            ctk.CTkLabel(kart,
-                         text="💡 Seçilmezse Outlook varsayılan hesabını kullanır.",
+            ctk.CTkLabel(kart, text="💡 Seçilmezse Outlook varsayılanı kullanılır.",
                          text_color=RENK_YAZI2, font=("Segoe UI",9)
                          ).pack(anchor="w", padx=14, pady=(2,12))
         else:
-            ctk.CTkLabel(kart,
-                         text="⚠ Outlook hesabı bulunamadı.\n"
-                              "Outlook'u açın ve tekrar deneyin.",
+            ctk.CTkLabel(kart, text="⚠ Outlook açık değil veya hesap bulunamadı.",
                          text_color=RENK_SARI, font=("Segoe UI",11),
                          justify="left").pack(padx=14, pady=14, anchor="w")
             self.cmb_outlook = None
 
         test_k = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         test_k.pack(fill="x", padx=10, pady=(12,4))
-        ctk.CTkLabel(test_k, text="Bağlantı Testi",
-                     font=("Segoe UI",11,"bold"),
+        ctk.CTkLabel(test_k, text="Bağlantı Testi", font=("Segoe UI",11,"bold"),
                      text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(10,4))
-        self.lbl_test = ctk.CTkLabel(test_k, text="",
-                                      font=("Segoe UI",10), text_color=RENK_YESIL)
+        self.lbl_test = ctk.CTkLabel(test_k, text="", font=("Segoe UI",10),
+                                      text_color=RENK_YESIL)
         self.lbl_test.pack(anchor="w", padx=14)
         ctk.CTkButton(test_k, text="📧 Test Maili Gönder", height=32,
                       fg_color=RENK_VURGU, hover_color=RENK_VURGU2,
-                      font=("Segoe UI",11),
-                      command=self._test_mail).pack(anchor="w", padx=14, pady=(4,12))
+                      font=("Segoe UI",11), command=self._test_mail
+                      ).pack(anchor="w", padx=14, pady=(4,12))
 
     def _test_mail(self):
-        cfg = load_config()
-        from_acc = cfg.get("outlook_account","")
-        hesaplar = outlook_hesaplari()
-        test_to  = from_acc or (hesaplar[0] if hesaplar else "")
+        cfg=load_config()
+        from_acc=cfg.get("outlook_account","")
+        hesaplar=outlook_hesaplari()
+        test_to=from_acc or (hesaplar[0] if hesaplar else "")
         if not test_to:
             self.lbl_test.configure(text="❌ Hesap bulunamadı.",
                                     text_color=RENK_KIRMIZI); return
-        ok, info = send_mail([test_to],"TEST","Test","Test mesajı.",[],
-                             "Test", from_acc or None)
+        ok,info=send_mail([test_to],"TEST","Test","Test mesajı.",
+                          from_acc or None,"Test Grubu")
         if ok:
             self.lbl_test.configure(
                 text=f"✅ Test gönderildi → {test_to}", text_color=RENK_YESIL)
@@ -689,12 +741,15 @@ class AyarlarPencere(ctk.CTkToplevel):
             self.lbl_test.configure(text=f"❌ {info}", text_color=RENK_KIRMIZI)
 
     def _kaydet(self):
-        cfg = load_config()
+        cfg=load_config()
         cfg["wa_group_name"] = self.ent_grup.get().strip()
+        try:
+            cfg["bekleme_dk"] = max(1, int(self.ent_sure.get().strip()))
+        except: cfg["bekleme_dk"] = 2
         if hasattr(self,"cmb_outlook") and self.cmb_outlook:
             cfg["outlook_account"] = self.cmb_outlook.get().strip()
-        kurallar = []
-        for (frame, kural, ea, ek) in self._kart_list:
+        kurallar=[]
+        for (frame,kural,ea,ek) in self._kart_list:
             if frame.winfo_exists():
                 kural["ad"] = ea.get().strip()
                 kural["keywords"] = [
@@ -708,17 +763,17 @@ class AyarlarPencere(ctk.CTkToplevel):
 # RAPOR
 # ══════════════════════════════════════════════════════════════════════════════
 class RaporPencere(ctk.CTkToplevel):
-    def __init__(self, master):
+    def __init__(self,master):
         super().__init__(master)
         self.title("Aylık Rapor"); self.geometry("820x580")
         self.configure(fg_color=RENK_ANA_ARKA); self.grab_set()
-        self._build(); self._goster(datetime.now().year, datetime.now().month)
+        self._build(); self._goster(datetime.now().year,datetime.now().month)
 
     def _build(self):
-        hdr = ctk.CTkFrame(self, fg_color=RENK_PANEL, height=50, corner_radius=0)
+        hdr=ctk.CTkFrame(self,fg_color=RENK_PANEL,height=50,corner_radius=0)
         hdr.pack(fill="x"); hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="📊  Aylık Rapor", font=("Segoe UI",16,"bold"),
-                     text_color=RENK_YAZI).pack(side="left", padx=16)
+        ctk.CTkLabel(hdr,text="📊  Aylık Rapor",font=("Segoe UI",16,"bold"),
+                     text_color=RENK_YAZI).pack(side="left",padx=16)
         now=datetime.now()
         yillar=[str(y) for y in range(now.year-2,now.year+1)]
         aylar=["Ocak","Şubat","Mart","Nisan","Mayıs","Haziran",
@@ -746,9 +801,9 @@ class RaporPencere(ctk.CTkToplevel):
         st.configure("D.Treeview.Heading",background=RENK_PANEL,
             foreground=RENK_YAZI2,font=("Segoe UI",10,"bold"))
         st.map("D.Treeview",background=[("selected",RENK_VURGU)])
-        cols=("Tarih","Gönderen","Kural","Mesaj","Resim")
+        cols=("Tarih","Gönderen","Kural","Mesaj")
         self.tree=ttk.Treeview(tbl,columns=cols,show="headings",style="D.Treeview")
-        for col,w in zip(cols,[120,140,110,280,60]):
+        for col,w in zip(cols,[120,140,110,350]):
             self.tree.heading(col,text=col); self.tree.column(col,width=w,anchor="w")
         sb=ttk.Scrollbar(tbl,orient="vertical",command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -764,15 +819,15 @@ class RaporPencere(ctk.CTkToplevel):
         rows,gunluk=db_rapor(yil,ay)
         for w in self.frm_ozet.winfo_children(): w.destroy()
         t=len(rows); self._krt("Toplam Red",str(t),RENK_KIRMIZI)
-        gs=len(gunluk); self._krt("Günlük Ort.",str(round(t/gs,1) if gs else 0),RENK_SARI)
+        gs=len(gunluk)
+        self._krt("Günlük Ort.",str(round(t/gs,1) if gs else 0),RENK_SARI)
         if gunluk:
             en=max(gunluk,key=gunluk.get)
             self._krt("En Yoğun Gün",f"{en}\n({gunluk[en]})",RENK_VURGU)
         self.tree.delete(*self.tree.get_children())
         for r in rows:
             self.tree.insert("","end",values=(
-                r[0][:19].replace("T"," "),r[1],r[2],
-                (r[3] or "")[:60],"📎 Var" if r[4] else "—"))
+                r[0][:19].replace("T"," "),r[1],r[2],(r[3] or "")[:80]))
 
     def _krt(self,b,d,r):
         f=ctk.CTkFrame(self.frm_ozet,fg_color=RENK_KART,corner_radius=8)
@@ -790,13 +845,13 @@ class SplashEkran(tk.Toplevel):
         self.overrideredirect(True); self.configure(bg="#071320")
         self.attributes("-topmost",True)
         W,H=600,340
-        sw=self.winfo_screenwidth(); sh=self.winfo_screenheight()
-        self.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
+        self.geometry(f"{W}x{H}+{(self.winfo_screenwidth()-W)//2}+"
+                      f"{(self.winfo_screenheight()-H)//2}")
         p=os.path.join(BASE_DIR,"splash.png")
         if PIL_OK and os.path.exists(p):
             img=Image.open(p).resize((W,H),Image.LANCZOS)
-            self._photo=ImageTk.PhotoImage(img)
-            tk.Label(self,image=self._photo,bg="#071320",bd=0
+            self._ph=ImageTk.PhotoImage(img)
+            tk.Label(self,image=self._ph,bg="#071320",bd=0
                      ).pack(fill="both",expand=True)
         else:
             tk.Label(self,text="Pregate Kayıt Red\nWA → Mail Botu",
@@ -810,13 +865,13 @@ class SplashEkran(tk.Toplevel):
         bf.place(x=0,y=H-4,width=W,height=4)
         self._bar=tk.Frame(bf,bg="#1a6ea8",height=4)
         self._bar.place(x=0,y=0,width=0,height=4)
-        self._W=W; self._step=0; self._animate()
+        self._W=W; self._step=0; self._anim()
 
-    def _animate(self):
+    def _anim(self):
         self._step+=1
         self._bar.place(x=0,y=0,
-                        width=min(int((self._step/30)*self._W),self._W),height=4)
-        if self._step<30: self.after(50,self._animate)
+                        width=min(int(self._step/30*self._W),self._W),height=4)
+        if self._step<30: self.after(50,self._anim)
 
     def kapat(self): self.destroy()
 
@@ -828,7 +883,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Pregate Kayıt Red – WA Mail Botu  |  Poliport")
-        self.geometry("900x620"); self.minsize(800,540)
+        self.geometry("900x640"); self.minsize(800,540)
         self.configure(fg_color=RENK_ANA_ARKA)
         self.wa_bot=None; self.running=False; self.mail_say=0
         db_init(); self._build_ui()
@@ -850,8 +905,7 @@ class App(ctk.CTk):
 
     def _build_sol(self,parent):
         sol=ctk.CTkFrame(parent,fg_color=RENK_PANEL,corner_radius=10,width=200)
-        sol.grid(row=0,column=0,sticky="nsew",padx=(0,7))
-        sol.pack_propagate(False)
+        sol.grid(row=0,column=0,sticky="nsew",padx=(0,7)); sol.pack_propagate(False)
         ctk.CTkLabel(sol,text="KONTROL",font=("Segoe UI",11,"bold"),
                      text_color=RENK_YAZI2).pack(anchor="w",padx=14,pady=(14,4))
         self.btn_baslat=ctk.CTkButton(sol,text="▶  Başlat",
@@ -878,14 +932,18 @@ class App(ctk.CTk):
         ctk.CTkLabel(f1,text="Bugün Gönderilen",
                      font=("Segoe UI",9),text_color=RENK_YAZI2).pack(pady=(8,0))
         self.lbl_sayac=ctk.CTkLabel(f1,text="0",
-                                     font=("Segoe UI",26,"bold"),
-                                     text_color=RENK_YESIL)
+                                     font=("Segoe UI",26,"bold"),text_color=RENK_YESIL)
         self.lbl_sayac.pack(pady=(0,8))
         cfg=load_config()
         self.lbl_grup=ctk.CTkLabel(sol,
             text=f"Grup: {cfg.get('wa_group_name','—')}",
             font=("Segoe UI",9),text_color=RENK_YAZI2,wraplength=170)
         self.lbl_grup.pack(padx=12,pady=(16,4),anchor="w")
+        dk=cfg.get("bekleme_dk",2)
+        self.lbl_sure=ctk.CTkLabel(sol,
+            text=f"Biriktirme: {dk} dk",
+            font=("Segoe UI",9),text_color=RENK_YAZI2)
+        self.lbl_sure.pack(padx=12,pady=(0,4),anchor="w")
 
     def _build_sag(self,parent):
         sag=ctk.CTkFrame(parent,fg_color=RENK_PANEL,corner_radius=10)
@@ -894,8 +952,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(sag,text="İŞLEM LOGU",font=("Segoe UI",11,"bold"),
                      text_color=RENK_YAZI2).grid(row=0,column=0,
                                                   sticky="w",padx=14,pady=(14,4))
-        self.txt_log=ctk.CTkTextbox(sag,fg_color=RENK_KART,
-                                     text_color=RENK_YAZI,
+        self.txt_log=ctk.CTkTextbox(sag,fg_color=RENK_KART,text_color=RENK_YAZI,
                                      font=("Consolas",10),corner_radius=8)
         self.txt_log.grid(row=1,column=0,sticky="nsew",padx=14,pady=(0,14))
 
@@ -905,16 +962,19 @@ class App(ctk.CTk):
             messagebox.showwarning("Uyarı","Ayarlar → WhatsApp'tan grup adını girin!")
             return
         if not cfg.get("kurallar"):
-            messagebox.showwarning("Uyarı","Ayarlar → Kurallar'dan en az bir kural ekleyin!")
+            messagebox.showwarning("Uyarı","Ayarlar → Kurallar'dan en az bir kural girin!")
             return
         self.running=True
         self.btn_baslat.configure(state="disabled")
         self.btn_durdur.configure(state="normal")
         self._log("🚀 Bot başlatılıyor…")
+        # Bekleme süresini güncelle
+        global BEKLEME_SURE
+        BEKLEME_SURE = cfg.get("bekleme_dk", 2) * 60
         self.wa_bot=WABot(on_log=self._log,
                           on_status=self._set_durum_p,
-                          on_message=self._on_message)
-        threading.Thread(target=self.wa_bot.start,daemon=True).start()
+                          on_message=self._on_mesaj_bitti)
+        threading.Thread(target=self.wa_bot.start, daemon=True).start()
 
     def _durdur(self):
         self.running=False
@@ -926,34 +986,45 @@ class App(ctk.CTk):
 
     def _ayarlar(self):
         AyarlarPencere(self)
-        self.after(500,lambda: self.lbl_grup.configure(
-            text=f"Grup: {load_config().get('wa_group_name','—')}"))
+        self.after(500, self._guncelle_labels)
+
+    def _guncelle_labels(self):
+        cfg=load_config()
+        self.lbl_grup.configure(text=f"Grup: {cfg.get('wa_group_name','—')}")
+        self.lbl_sure.configure(text=f"Biriktirme: {cfg.get('bekleme_dk',2)} dk")
 
     def _rapor(self): RaporPencere(self)
 
-    def _on_message(self,gonderen,text,img_paths):
-        cfg=load_config()
-        metin_lower=(text or "").lower()
-        eslesen=[]
+    def _on_mesaj_bitti(self, gonderen, birlesik_metin):
+        """
+        Biriktiriciden gelen callback — 2 dk doldu, gönder.
+        birlesik_metin = kişinin 2 dk içinde attığı tüm mesajlar \n ile birleşik.
+        """
+        cfg = load_config()
+        metin_lower = birlesik_metin.lower()
+        eslesen = []
         for kural in cfg.get("kurallar",[]):
             for kw in kural.get("keywords",[]):
                 if kw.lower() in metin_lower:
                     eslesen.append(kural); break
+
         if not eslesen:
-            self._log(f"💬 [{gonderen}]: {text[:60]} — eşleşme yok")
+            self._log(f"💬 [{gonderen}]: eşleşme yok — {birlesik_metin[:60]}")
             return
-        from_acc=cfg.get("outlook_account","") or None
+
+        from_acc = cfg.get("outlook_account","") or None
         for kural in eslesen:
-            ml=kural.get("mail_list",[])
+            ml = kural.get("mail_list",[])
             if not ml:
                 self._log(f"⚠ '{kural.get('ad')}' mail listesi boş!"); continue
-            ok,info=send_mail(ml,kural["ad"],gonderen,text,
-                              img_paths,cfg.get("wa_group_name",""),from_acc)
+            ok, info = send_mail(ml, kural["ad"], gonderen,
+                                 birlesik_metin, from_acc,
+                                 cfg.get("wa_group_name",""))
             if ok:
                 self.mail_say+=1
-                self.after(0,lambda: self.lbl_sayac.configure(
+                self.after(0, lambda: self.lbl_sayac.configure(
                     text=str(self.mail_say)))
-                db_ekle(gonderen,kural["ad"],text,bool(img_paths))
+                db_ekle(gonderen, kural["ad"], birlesik_metin, False)
                 self._log(f"✉ [{kural['ad']}] {gonderen} → "
                           f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}")
             else:
@@ -969,8 +1040,7 @@ class App(ctk.CTk):
         self.after(0,_do)
 
     def _set_durum(self,text,color):
-        self.after(0,lambda: self.lbl_durum.configure(
-            text=text,text_color=color))
+        self.after(0,lambda: self.lbl_durum.configure(text=text,text_color=color))
 
     def _set_durum_p(self,_,text,color): self._set_durum(text,color)
 
