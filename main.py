@@ -226,9 +226,24 @@ class WABot:
 
         self.on_log("🔍 WhatsApp DB aranıyor…")
         db = self._wa_db_bul()
+        self.on_log(f"🔎 Arama tamamlandı: {'bulundu' if db else 'bulunamadı'}")
+        if db:
+            # Erişim testi
+            try:
+                with open(db, "rb") as f:
+                    f.read(16)
+                self.on_log(f"✅ DB bulundu ve okunabilir: {os.path.basename(db)}")
+                self.on_log(f"   Tam yol: {db}")
+            except PermissionError:
+                self.on_log(f"❌ DB bulundu ama erişim reddedildi: {db}")
+                self.on_log("   Windows izin kısıtlaması var.")
+                db = None
+            except Exception as e:
+                self.on_log(f"⚠ DB erişim hatası: {e}")
+                db = None
         if db:
             self._wa_db = db
-            self.on_log(f"✅ DB bulundu: {db}")
+            self.on_log(f"✅ DB hazır: {os.path.basename(db)}")
             self.on_log("🔬 DB şeması inceleniyor…")
             self._db_kesfet()
             self.on_log("📌 Başlangıç ID alınıyor…")
@@ -238,14 +253,36 @@ class WABot:
             self.on_log("✅ Hazır! Yeni mesaj bekleniyor…")
             self._dinle()
         else:
-            self.on_log("⚠ WhatsApp Desktop DB bulunamadı.")
-            self._wa_tum_dosyalari_logla()
+            self.on_log("❌ WhatsApp Desktop DB bulunamadı veya erişim reddedildi.")
+            self.on_log("📋 Kontrol edilecek yollar:")
+            appdata = os.environ.get("LOCALAPPDATA","")
+            pkg = os.path.join(appdata,"Packages","5319275A.WhatsAppDesktop_cv1g1gvanyjgm")
+            self.on_log(f"   Paket: {pkg}")
+            self.on_log(f"   Paket var mı: {os.path.exists(pkg)}")
+            ls = os.path.join(pkg,"LocalState")
+            self.on_log(f"   LocalState: {os.path.exists(ls)}")
+            sess = os.path.join(ls,"sessions")
+            self.on_log(f"   sessions: {os.path.exists(sess)}")
+            if os.path.exists(sess):
+                try:
+                    items = os.listdir(sess)
+                    self.on_log(f"   sessions içi: {items}")
+                    for h in items:
+                        hdir = os.path.join(sess,h)
+                        if os.path.isdir(hdir):
+                            try:
+                                fs = os.listdir(hdir)
+                                self.on_log(f"   {h}: {fs}")
+                            except Exception as e:
+                                self.on_log(f"   {h}: ERİŞİM REDDEDİLDİ - {e}")
+                except Exception as e:
+                    self.on_log(f"   sessions listelenemedi: {e}")
             self.on_status("WARN", "● DB Bulunamadı", RENK_KIRMIZI)
             while self.running:
                 time.sleep(30)
-                db = self._wa_db_bul()
-                if db:
-                    self._wa_db = db
+                db2 = self._wa_db_bul()
+                if db2:
+                    self._wa_db = db2
                     self.on_log("✅ DB bulundu, başlatılıyor…")
                     self._db_kesfet()
                     self._son_id = self._son_id_al()
