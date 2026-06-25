@@ -561,15 +561,15 @@ class AyarlarPencere(ctk.CTkToplevel):
         self._render_kurallar()
 
     def _render_kurallar(self):
-        for w in self._kart_list:
-            w.destroy()
+        for item in self._kart_list:
+            item[0].destroy()
         self._kart_list.clear()
         cfg = load_config()
         for i, kural in enumerate(cfg.get("kurallar", [])):
             renk = RENKLER[i % len(RENKLER)]
-            kart = self._kural_kart(self.scroll, kural, renk)
+            kart, ent_ad, ent_kw = self._kural_kart(self.scroll, kural, renk)
             kart.grid(row=i, column=0, sticky="ew", pady=(0, 10))
-            self._kart_list.append(kart)
+            self._kart_list.append((kart, kural, ent_ad, ent_kw))
 
     def _kural_kart(self, parent, kural, renk):
         frame = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
@@ -663,7 +663,7 @@ class AyarlarPencere(ctk.CTkToplevel):
                       command=lambda k=kural, f=frame: self._kural_sil(k, f)
                       ).pack(side="left")
 
-        return frame
+        return frame, ent_ad, ent_kw
 
     def _kural_ekle(self):
         cfg = load_config()
@@ -679,7 +679,7 @@ class AyarlarPencere(ctk.CTkToplevel):
                            if k.get("id") != kural.get("id")]
         save_config(cfg)
         frame.destroy()
-        self._kart_list = [w for w in self._kart_list if w != frame]
+        self._kart_list = [item for item in self._kart_list if item[0] != frame]
 
     # ── SEKME 3: Outlook ─────────────────────────────────────────────────────
     def _build_outlook_tab(self, parent):
@@ -792,12 +792,17 @@ class AyarlarPencere(ctk.CTkToplevel):
         if hasattr(self, 'cmb_outlook') and self.cmb_outlook:
             cfg["outlook_account"] = self.cmb_outlook.get().strip()
 
-        # Kural verilerini kart'lardan topla
+        # Kart entry'lerinden güncel değerleri oku
         kurallar = []
-        for kart in self._kart_list:
-            if isinstance(kart, ctk.CTkFrame) and kart.winfo_exists():
-                pass  # FocusOut ile zaten güncellendi
-        # config'deki kurallar zaten güncel (FocusOut bağlı)
+        for (frame, kural, ent_ad, ent_kw) in self._kart_list:
+            if frame.winfo_exists():
+                kural["ad"] = ent_ad.get().strip()
+                kural["keywords"] = [
+                    x.strip().lower()
+                    for x in ent_kw.get().split(",") if x.strip()
+                ]
+                kurallar.append(kural)
+        cfg["kurallar"] = kurallar
         save_config(cfg)
         self.destroy()
 
