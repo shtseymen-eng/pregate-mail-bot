@@ -197,11 +197,13 @@ class MesajBiriktiric:
 # ══════════════════════════════════════════════════════════════════════════════
 class WABot:
     WA_DB_PATTERNS = [
+        r"%LOCALAPPDATA%\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalState\messages.db",
+        r"%LOCALAPPDATA%\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalState\default\messages.db",
+        r"%LOCALAPPDATA%\Packages\5319275A.WhatsAppDesktop_cv1g1gvanyjgm\LocalCache\Roaming\WhatsApp\messages.db",
         r"%LOCALAPPDATA%\Packages\5319275A.WhatsApp_cv1g1gvanyjgm\LocalState\messages.db",
         r"%LOCALAPPDATA%\Packages\5319275A.WhatsApp_cv1g1gvanyjgm\LocalState\default\messages.db",
         r"%LOCALAPPDATA%\WhatsApp\messages.db",
         r"%APPDATA%\WhatsApp\messages.db",
-        r"%USERPROFILE%\AppData\Local\WhatsApp\messages.db",
     ]
 
     def __init__(self, on_log, on_status, on_message):
@@ -255,19 +257,22 @@ class WABot:
             expanded = os.path.expandvars(p)
             if os.path.exists(expanded):
                 return expanded
-        # Wildcard arama
+        # Wildcard — her iki paket adını dene
         appdata = os.environ.get("LOCALAPPDATA", "")
-        for pat in [
-            os.path.join(appdata, "Packages", "5319275A.WhatsApp*",
-                         "LocalState", "messages.db"),
-            os.path.join(appdata, "Packages", "5319275A.WhatsApp*",
-                         "LocalState", "*", "messages.db"),
-            os.path.join(appdata, "Packages", "5319275A.WhatsApp*",
-                         "LocalCache", "Roaming", "WhatsApp", "messages.db"),
-        ]:
-            found = glob.glob(pat)
-            if found:
-                return found[0]
+        for pkg in ["5319275A.WhatsAppDesktop*", "5319275A.WhatsApp*"]:
+            base = os.path.join(appdata, "Packages", pkg)
+            for sub in [
+                ("LocalState", "messages.db"),
+                ("LocalState", "*", "messages.db"),
+            ]:
+                pat = os.path.join(base, *sub)
+                found = glob.glob(pat)
+                if found: return found[0]
+            # Rekürsif arama
+            for pat in glob.glob(os.path.join(appdata,"Packages",pkg)):
+                for root,dirs,files in os.walk(pat):
+                    if "messages.db" in files:
+                        return os.path.join(root,"messages.db")
         return None
 
     def _db_kesfet(self):
