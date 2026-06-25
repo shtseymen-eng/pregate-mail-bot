@@ -156,11 +156,11 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths, grup_adi, from_ac
             try:
                 ns = ol.GetNamespace("MAPI")
                 for acc in ns.Accounts:
-                    if acc.SmtpAddress == from_account:
+                    if acc.SmtpAddress.lower() == from_account.lower():
                         mail.SendUsingAccount = acc
                         break
-            except:
-                pass
+            except Exception as ex:
+                pass  # Hata olursa varsayılan hesaptan gönder
         for p in img_paths:
             if os.path.exists(p):
                 mail.Attachments.Add(p)
@@ -257,29 +257,67 @@ class WhatsAppBot:
             time.sleep(4)
 
     def _tara(self):
-        msgs = self.driver.find_elements(
-            By.CSS_SELECTOR, '[data-testid="msg-container"]')
-        for msg in msgs[-15:]:
+        # Birden fazla selector dene - WhatsApp Web versiyon farklarına karşı
+        msgs = []
+        for sel in [
+            '[data-testid="msg-container"]',
+            'div.message-in, div.message-out',
+            '[class*="message-"]',
+        ]:
+            msgs = self.driver.find_elements(By.CSS_SELECTOR, sel)
+            if msgs:
+                break
+
+        for msg in msgs[-20:]:
             try:
-                mid = msg.get_attribute("data-id") or msg.id
+                # Benzersiz ID
+                mid = msg.get_attribute("data-id") or msg.get_attribute("data-key") or msg.id
                 if mid in self._seen:
                     continue
                 self._seen.add(mid)
+
+                # Kendi gönderdiğimiz mesajları atla (message-out)
+                try:
+                    cls = msg.get_attribute("class") or ""
+                    if "message-out" in cls:
+                        continue
+                except: pass
+
+                # Gönderen adı - birden fazla yöntem dene
                 gonderen = ""
-                try:
-                    gonderen = msg.find_element(
-                        By.CSS_SELECTOR, 'span[aria-label]'
-                    ).get_attribute("aria-label") or ""
-                except: pass
-                try:
-                    gonderen = gonderen or msg.find_element(
-                        By.CSS_SELECTOR, '[data-testid="msg-meta"] span').text
-                except: pass
+                for gsel in [
+                    '[data-testid="author"]',
+                    'span.copyable-text[data-pre-plain-text]',
+                    '._ahxt',
+                    'span[dir="auto"] span[aria-label]',
+                ]:
+                    try:
+                        el = msg.find_element(By.CSS_SELECTOR, gsel)
+                        gonderen = (el.get_attribute("data-pre-plain-text") or
+                                    el.get_attribute("aria-label") or
+                                    el.text or "")
+                        if gonderen:
+                            # "[10:02, 25.06.2026] Ad Soyad: " formatını temizle
+                            if "] " in gonderen:
+                                gonderen = gonderen.split("] ")[-1].rstrip(": ")
+                            break
+                    except: pass
+
+                # Metin - birden fazla yöntem dene
                 text = ""
-                try:
-                    text = msg.find_element(
-                        By.CSS_SELECTOR, '[data-testid="msg-text"]').text
-                except: pass
+                for tsel in [
+                    '[data-testid="msg-text"]',
+                    'span.selectable-text',
+                    '[class*="selectable-text"]',
+                    'span[dir="ltr"]',
+                ]:
+                    try:
+                        text = msg.find_element(By.CSS_SELECTOR, tsel).text
+                        if text:
+                            break
+                    except: pass
+
+                # Resim
                 img_paths = []
                 try:
                     for img_el in msg.find_elements(
@@ -302,8 +340,10 @@ class WhatsAppBot:
                                     f.write(raw)
                                 img_paths.append(p)
                 except: pass
+
                 if text or img_paths:
-                    self.on_message(gonderen, text, img_paths)
+                    self.on_message(gonderen or "Bilinmiyor", text, img_paths)
+
             except StaleElementReferenceException:
                 continue
             except: continue
