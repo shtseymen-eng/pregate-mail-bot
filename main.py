@@ -8,6 +8,8 @@ import base64
 import tempfile
 import sqlite3
 import uuid
+import subprocess
+import re
 from datetime import datetime
 from tkinter import messagebox, ttk
 import tkinter as tk
@@ -18,20 +20,24 @@ try:
 except ImportError:
     PIL_OK = False
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    NoSuchElementException, StaleElementReferenceException, TimeoutException
-)
-
 try:
     import win32com.client
+    import win32gui
+    import win32con
+    import win32process
+    import win32api
     OUTLOOK_OK = True
+    WIN32_OK   = True
 except ImportError:
     OUTLOOK_OK = False
+    WIN32_OK   = False
+
+try:
+    import pyautogui
+    import pyperclip
+    PYAUTOGUI_OK = True
+except ImportError:
+    PYAUTOGUI_OK = False
 
 # ── Tema ────────────────────────────────────────────────────────────────────
 RENK_ANA_ARKA = "#071320"
@@ -58,8 +64,7 @@ else:
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 DB_FILE     = os.path.join(BASE_DIR, "kayitlar.db")
-PROFILE_DIR = os.path.join(BASE_DIR, "chrome_profile")
-os.makedirs(PROFILE_DIR, exist_ok=True)
+MSG_FILE    = os.path.join(BASE_DIR, "son_mesajlar.json")
 
 # ── Config ──────────────────────────────────────────────────────────────────
 def load_config():
@@ -67,7 +72,8 @@ def load_config():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
-        return {"wa_group_name": "", "outlook_account": "", "kurallar": []}
+        return {"wa_group_name": "Pregate Kayıt Red",
+                "outlook_account": "", "kurallar": []}
 
 def save_config(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -101,18 +107,14 @@ def db_rapor(yil, ay):
     con.close()
     return rows, gunluk
 
-# ── Outlook yardımcıları ─────────────────────────────────────────────────────
+# ── Outlook ─────────────────────────────────────────────────────────────────
 def outlook_hesaplari():
-    """Outlook'taki tüm e-posta hesaplarını listele."""
     if not OUTLOOK_OK:
         return []
     try:
         ol = win32com.client.Dispatch("Outlook.Application")
         ns = ol.GetNamespace("MAPI")
-        hesaplar = []
-        for acc in ns.Accounts:
-            hesaplar.append(acc.SmtpAddress)
-        return hesaplar
+        return [acc.SmtpAddress for acc in ns.Accounts]
     except:
         return []
 
@@ -139,19 +141,19 @@ Saygılarımızla,
 Pregate Araç Kontrol Sistemi
 """
 
-def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths, grup_adi, from_account=None):
+def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths,
+              grup_adi, from_account=None):
     if not OUTLOOK_OK:
         return False, "pywin32 yüklü değil"
     try:
-        tarih  = datetime.now().strftime("%d.%m.%Y %H:%M")
-        ol     = win32com.client.Dispatch("Outlook.Application")
-        mail   = ol.CreateItem(0)
+        tarih = datetime.now().strftime("%d.%m.%Y %H:%M")
+        ol    = win32com.client.Dispatch("Outlook.Application")
+        mail  = ol.CreateItem(0)
         mail.Subject = f"[KAYIT RED] {kural_ad} – {tarih}"
         mail.Body    = MAIL_SABLON.format(
             tarih=tarih, gonderen=gonderen,
             grup=grup_adi, mesaj=mesaj or "(Mesaj yok)")
         mail.To = "; ".join(mail_list)
-        # Belirli hesaptan gönder
         if from_account:
             try:
                 ns = ol.GetNamespace("MAPI")
@@ -159,8 +161,7 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths, grup_adi, from_ac
                     if acc.SmtpAddress.lower() == from_account.lower():
                         mail.SendUsingAccount = acc
                         break
-            except Exception as ex:
-                pass  # Hata olursa varsayılan hesaptan gönder
+            except: pass
         for p in img_paths:
             if os.path.exists(p):
                 mail.Attachments.Add(p)
@@ -169,191 +170,235 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, img_paths, grup_adi, from_ac
     except Exception as e:
         return False, str(e)
 
-# ── WhatsApp Bot ─────────────────────────────────────────────────────────────
-class WhatsAppBot:
-    def __init__(self, on_log, on_status, on_message, on_groups):
-        self.on_log    = on_log
-        self.on_status = on_status
-        self.on_message= on_message
-        self.on_groups = on_groups
-        self.driver    = None
-        self.running   = False
-        self._seen     = set()
-        self._tmp      = tempfile.mkdtemp()
+# ══════════════════════════════════════════════════════════════════════════════
+# WHATSAPP DESKTOP OKUYUCU
+# Yöntem: WA Desktop açık pencereden mesajları clipboard ile okur
+# ══════════════════════════════════════════════════════════════════════════════
+class WADesktopBot:
+    """
+    WhatsApp Desktop uygulamasını kullanır.
+    - WA Desktop penceresi açık olmalı
+    - Hedef gruba tıklanmış olmalı (ilk açılışta program yapar)
+    - Her 5 sn'de yeni mesajları kontrol eder
+    """
+    WA_EXE_PATHS = [
+        r"C:\Users\{user}\AppData\Local\WhatsApp\WhatsApp.exe",
+        r"C:\Program Files\WindowsApps\5319275A.WhatsApp_*\WhatsApp.exe",
+        r"C:\Users\{user}\AppData\Local\Programs\WhatsApp\WhatsApp.exe",
+    ]
+
+    def __init__(self, on_log, on_status, on_message):
+        self.on_log     = on_log
+        self.on_status  = on_status
+        self.on_message = on_message
+        self.running    = False
+        self._seen      = set()
+        self._tmp       = tempfile.mkdtemp()
+        self._wa_hwnd   = None
+        self._son_y_pos = 0
 
     def start(self):
-        opts = Options()
-        opts.add_argument(f"--user-data-dir={PROFILE_DIR}")
-        opts.add_argument("--profile-directory=WABot")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-notifications")
-        try:
-            self.driver = webdriver.Chrome(options=opts)
-            self.driver.get("https://web.whatsapp.com")
-            self.on_log("🌐 WhatsApp Web açılıyor…")
-            self.on_status("QR", "● QR Bekleniyor", RENK_SARI)
-            self.on_log("📷 Chrome penceresinde QR taratın (maks 3 dk)…")
-            self.running = True
-            self._bekle_giris()
-        except Exception as e:
-            self.on_log(f"❌ Chrome hatası: {e}")
-            self.running = False
-            self.on_status("ERR", "● Hata", RENK_KIRMIZI)
+        self.running = True
+        self.on_status("START", "● Başlatılıyor…", RENK_SARI)
 
-    def _bekle_giris(self):
-        try:
-            WebDriverWait(self.driver, 180).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, '[data-testid="chat-list"]')))
-            self.on_status("OK", "● Bağlandı ✓", RENK_YESIL)
-            self.on_log("✅ WhatsApp bağlantısı kuruldu!")
-            self._grup_listele()
-            self._grup_ac()
-        except TimeoutException:
-            self.on_log("⏱ QR zaman aşımı. Lütfen tekrar başlatın.")
-            self.running = False
-            self.on_status("ERR", "● Zaman Aşımı", RENK_KIRMIZI)
+        # WA Desktop bul veya aç
+        if not self._wa_bul_veya_ac():
+            return
 
-    def _grup_listele(self):
-        """Soldaki sohbet listesinden grupları topla ve callback'e gönder."""
+        # Gruba git
+        if not self._gruba_git():
+            return
+
+        self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
+        self.on_log("✅ WhatsApp Desktop bağlandı. Mesajlar izleniyor…")
+        self._dinle()
+
+    def _wa_bul_veya_ac(self):
+        """WA Desktop penceresini bul, yoksa aç."""
+        hwnd = self._wa_hwnd_bul()
+        if hwnd:
+            self._wa_hwnd = hwnd
+            self.on_log("✅ WhatsApp Desktop penceresi bulundu.")
+            return True
+
+        self.on_log("📱 WhatsApp Desktop açılıyor…")
+        self.on_status("WA", "● WA Desktop açılıyor", RENK_SARI)
+
+        # Başlat menüsünden aç
         try:
-            time.sleep(2)
-            items = self.driver.find_elements(
-                By.CSS_SELECTOR, '[data-testid="cell-frame-title"]')
-            gruplar = list(dict.fromkeys([i.text for i in items if i.text]))
-            self.on_groups(gruplar)
+            subprocess.Popen(["explorer.exe",
+                              "shell:AppsFolder\\5319275A.WhatsApp_cv1g1gvanyjgm!App"])
+            time.sleep(6)
         except:
             pass
 
-    def _grup_ac(self):
+        # Tekrar ara
+        for _ in range(10):
+            hwnd = self._wa_hwnd_bul()
+            if hwnd:
+                self._wa_hwnd = hwnd
+                self.on_log("✅ WhatsApp Desktop açıldı.")
+                return True
+            time.sleep(2)
+
+        self.on_log("❌ WhatsApp Desktop bulunamadı. Lütfen manuel açın.")
+        self.on_status("ERR", "● WA Bulunamadı", RENK_KIRMIZI)
+        return False
+
+    def _wa_hwnd_bul(self):
+        """WhatsApp Desktop ana penceresini bul."""
+        result = []
+        def cb(hwnd, _):
+            title = win32gui.GetWindowText(hwnd)
+            cls   = win32gui.GetClassName(hwnd)
+            if ("WhatsApp" in title or cls == "WhatsApp") and win32gui.IsWindowVisible(hwnd):
+                result.append(hwnd)
+        if WIN32_OK:
+            win32gui.EnumWindows(cb, None)
+        return result[0] if result else None
+
+    def _gruba_git(self):
+        """WA Desktop'ta hedef gruba git."""
         cfg  = load_config()
         grup = cfg.get("wa_group_name", "").strip()
         if not grup:
-            self.on_log("⚠ Henüz grup seçilmedi. Ayarlar → WhatsApp sekmesinden seçin.")
-            return
+            self.on_log("⚠ Grup adı boş! Ayarlar'dan girin.")
+            return False
+
         self.on_log(f"🔍 '{grup}' grubu aranıyor…")
+
+        if not WIN32_OK or not PYAUTOGUI_OK:
+            self.on_log("⚠ win32 veya pyautogui eksik, grup araması yapılamıyor.")
+            return True  # Yine de dinlemeye devam et
+
         try:
-            sb = WebDriverWait(self.driver, 15).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, '[data-testid="chat-list-search"]')))
-            sb.click(); time.sleep(0.5)
-            sb.send_keys(grup); time.sleep(2)
-            first = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, '[data-testid="cell-frame-container"]')))
-            first.click(); time.sleep(2)
-            self.on_log(f"📌 '{grup}' grubuna girildi. Mesajlar izleniyor…")
-            self._dinle()
+            # Pencereyi öne getir
+            win32gui.ShowWindow(self._wa_hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(self._wa_hwnd)
+            time.sleep(1)
+
+            # Ctrl+F ile arama aç
+            pyautogui.hotkey('ctrl', 'f')
+            time.sleep(1)
+
+            # Grup adını yaz
+            pyperclip.copy(grup)
+            pyautogui.hotkey('ctrl', 'v')
+            time.sleep(2)
+
+            # Enter ile ilk sonuca git
+            pyautogui.press('enter')
+            time.sleep(2)
+
+            # Escape ile aramayı kapat
+            pyautogui.press('escape')
+            time.sleep(1)
+
+            self.on_log(f"📌 '{grup}' grubuna gidildi.")
+            return True
         except Exception as e:
-            self.on_log(f"❌ Grup açılamadı: {e}")
+            self.on_log(f"⚠ Grup açma hatası: {e} — devam ediliyor.")
+            return True
 
     def _dinle(self):
+        """Ana dinleme döngüsü — her 5 sn mesajları kontrol et."""
+        hata_sayac = 0
         while self.running:
             try:
-                self._tara()
+                self._mesajlari_oku()
+                hata_sayac = 0
             except Exception as e:
-                self.on_log(f"⚠ Tarama hatası: {e}")
-            time.sleep(4)
+                hata_sayac += 1
+                self.on_log(f"⚠ Okuma hatası ({hata_sayac}): {e}")
+                if hata_sayac > 10:
+                    self.on_log("🔄 Bağlantı yenileniyor…")
+                    self._gruba_git()
+                    hata_sayac = 0
+            time.sleep(5)
 
-    def _tara(self):
-        # Birden fazla selector dene - WhatsApp Web versiyon farklarına karşı
-        msgs = []
-        for sel in [
-            '[data-testid="msg-container"]',
-            'div.message-in, div.message-out',
-            '[class*="message-"]',
-        ]:
-            msgs = self.driver.find_elements(By.CSS_SELECTOR, sel)
-            if msgs:
-                break
+    def _mesajlari_oku(self):
+        """
+        WA Desktop penceresindeki mesajları Ctrl+A, Ctrl+C ile oku.
+        Sadece yeni mesajları işle.
+        """
+        if not WIN32_OK or not PYAUTOGUI_OK:
+            return
 
-        for msg in msgs[-20:]:
-            try:
-                # Benzersiz ID
-                mid = msg.get_attribute("data-id") or msg.get_attribute("data-key") or msg.id
-                if mid in self._seen:
-                    continue
-                self._seen.add(mid)
+        hwnd = self._wa_hwnd_bul()
+        if not hwnd:
+            self.on_log("⚠ WA Desktop penceresi kapandı, yeniden açılıyor…")
+            self._wa_bul_veya_ac()
+            return
 
-                # Kendi gönderdiğimiz mesajları atla (message-out)
-                try:
-                    cls = msg.get_attribute("class") or ""
-                    if "message-out" in cls:
-                        continue
-                except: pass
+        try:
+            # Sohbet alanına tıkla (pencere ortası)
+            rect = win32gui.GetWindowRect(hwnd)
+            cx = (rect[0] + rect[2]) // 2
+            cy = (rect[1] + rect[3]) // 2
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.3)
 
-                # Gönderen adı - birden fazla yöntem dene
-                gonderen = ""
-                for gsel in [
-                    '[data-testid="author"]',
-                    'span.copyable-text[data-pre-plain-text]',
-                    '._ahxt',
-                    'span[dir="auto"] span[aria-label]',
-                ]:
-                    try:
-                        el = msg.find_element(By.CSS_SELECTOR, gsel)
-                        gonderen = (el.get_attribute("data-pre-plain-text") or
-                                    el.get_attribute("aria-label") or
-                                    el.text or "")
-                        if gonderen:
-                            # "[10:02, 25.06.2026] Ad Soyad: " formatını temizle
-                            if "] " in gonderen:
-                                gonderen = gonderen.split("] ")[-1].rstrip(": ")
-                            break
-                    except: pass
+            # Mesaj alanını seç ve kopyala
+            pyautogui.click(cx, cy)
+            time.sleep(0.2)
+            pyautogui.hotkey('ctrl', 'a')
+            time.sleep(0.3)
+            pyautogui.hotkey('ctrl', 'c')
+            time.sleep(0.5)
 
-                # Metin - birden fazla yöntem dene
-                text = ""
-                for tsel in [
-                    '[data-testid="msg-text"]',
-                    'span.selectable-text',
-                    '[class*="selectable-text"]',
-                    'span[dir="ltr"]',
-                ]:
-                    try:
-                        text = msg.find_element(By.CSS_SELECTOR, tsel).text
-                        if text:
-                            break
-                    except: pass
+            # Panodan oku
+            text = pyperclip.paste()
+            if not text:
+                return
 
-                # Resim
-                img_paths = []
-                try:
-                    for img_el in msg.find_elements(
-                            By.CSS_SELECTOR, 'img[src^="blob:"]'):
-                        src = img_el.get_attribute("src")
-                        if src:
-                            data = self.driver.execute_script("""
-                                const url=arguments[0];
-                                return new Promise(res=>{
-                                    fetch(url).then(r=>r.blob()).then(b=>{
-                                        const fr=new FileReader();
-                                        fr.onload=()=>res(fr.result);
-                                        fr.readAsDataURL(b);});});
-                            """, src)
-                            if data and "," in data:
-                                raw = base64.b64decode(data.split(",")[1])
-                                p = os.path.join(
-                                    self._tmp, f"img_{int(time.time()*1000)}.jpg")
-                                with open(p, "wb") as f:
-                                    f.write(raw)
-                                img_paths.append(p)
-                except: pass
+            self._parse_mesajlar(text)
 
-                if text or img_paths:
-                    self.on_message(gonderen or "Bilinmiyor", text, img_paths)
+        except Exception as e:
+            raise e
 
-            except StaleElementReferenceException:
+    def _parse_mesajlar(self, raw_text):
+        """
+        Kopyalanan metni satırlara böl ve yeni mesajları yakala.
+        WA Desktop format: "[GG.AA.YYYY, SS:DD:SS] Ad Soyad: mesaj"
+        """
+        satirlar = raw_text.split('\n')
+        # Mesaj pattern: [tarih, saat] Gönderen: metin
+        pattern = re.compile(
+            r'^\[?(\d{1,2}[./]\d{1,2}[./]\d{2,4}),?\s*(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(.+?):\s*(.*)$'
+        )
+
+        for satir in satirlar:
+            satir = satir.strip()
+            if not satir:
                 continue
-            except: continue
+
+            m = pattern.match(satir)
+            if not m:
+                continue
+
+            tarih_str = m.group(1)
+            saat_str  = m.group(2)
+            gonderen  = m.group(3).strip()
+            metin     = m.group(4).strip()
+
+            # Benzersiz ID: tarih+saat+gonderen+metin özeti
+            mid = f"{tarih_str}_{saat_str}_{gonderen}_{metin[:30]}"
+            if mid in self._seen:
+                continue
+            self._seen.add(mid)
+
+            # Sadece bugünkü mesajları işle
+            bugun = datetime.now().strftime("%d.%m.%Y")
+            bugun2 = datetime.now().strftime("%d/%m/%Y")
+            if tarih_str not in (bugun, bugun2) and \
+               tarih_str.replace(".", "/") != bugun2:
+                continue
+
+            if metin:
+                self.on_message(gonderen, metin, [])
 
     def stop(self):
         self.running = False
-        try:
-            if self.driver: self.driver.quit()
-        except: pass
-        self.driver = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -367,21 +412,20 @@ class MailOnizleme(ctk.CTkToplevel):
         self.configure(fg_color=RENK_ANA_ARKA)
         self.grab_set()
 
-        cfg   = load_config()
-        tarih = datetime.now().strftime("%d.%m.%Y %H:%M")
+        cfg      = load_config()
+        tarih    = datetime.now().strftime("%d.%m.%Y %H:%M")
         gonderen = "Ahmet Yılmaz"
-        mesaj    = f"[{keywords[0] if keywords else kural_ad}] 34 ABC 123 plakalı araç kayıt yaptırmadı."
+        kw_str   = keywords[0] if keywords else kural_ad
+        mesaj    = f"[{kw_str}] 34 ABC 123 plakalı araç kayıt yaptırmadı."
         grup     = cfg.get("wa_group_name", "Pregate Kayıt Red")
         from_acc = cfg.get("outlook_account", "—")
 
         hdr = ctk.CTkFrame(self, fg_color=RENK_PANEL, height=48, corner_radius=0)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
         ctk.CTkLabel(hdr, text=f"✉  Mail Önizleme — {kural_ad}",
                      font=("Segoe UI", 14, "bold"),
                      text_color=RENK_YAZI).pack(side="left", padx=16, pady=10)
 
-        # Meta bilgiler
         meta = ctk.CTkFrame(self, fg_color=RENK_KART, corner_radius=8)
         meta.pack(fill="x", padx=14, pady=(12, 4))
         for label, val in [
@@ -395,24 +439,21 @@ class MailOnizleme(ctk.CTkToplevel):
                          text_color=RENK_YAZI2,
                          font=("Segoe UI", 10, "bold")).pack(side="left")
             ctk.CTkLabel(row, text=val, anchor="w",
-                         text_color=RENK_YAZI,
-                         font=("Segoe UI", 10),
+                         text_color=RENK_YAZI, font=("Segoe UI", 10),
                          wraplength=400).pack(side="left", padx=(4, 0))
 
-        ctk.CTkLabel(self, text="MAİL İÇERİĞİ",
-                     font=("Segoe UI", 10, "bold"),
+        ctk.CTkLabel(self, text="MAİL İÇERİĞİ", font=("Segoe UI", 10, "bold"),
                      text_color=RENK_YAZI2).pack(anchor="w", padx=14, pady=(8, 2))
 
         txt = ctk.CTkTextbox(self, fg_color=RENK_KART, text_color=RENK_YAZI,
                               font=("Consolas", 10), corner_radius=8)
         txt.pack(fill="both", expand=True, padx=14, pady=(0, 8))
-        icerik = MAIL_SABLON.format(
-            tarih=tarih, gonderen=gonderen, grup=grup, mesaj=mesaj)
-        txt.insert("end", icerik)
+        txt.insert("end", MAIL_SABLON.format(
+            tarih=tarih, gonderen=gonderen, grup=grup, mesaj=mesaj))
         txt.configure(state="disabled")
 
         ctk.CTkLabel(self,
-                     text="⚠ Bu örnek bir önizlemedir. Gerçek mesaj içeriğine göre değişir.",
+                     text="⚠ Bu örnek bir önizlemedir.",
                      font=("Segoe UI", 9), text_color=RENK_SARI).pack(pady=(0, 4))
         ctk.CTkButton(self, text="Kapat", height=34,
                       fg_color=RENK_VURGU, hover_color=RENK_VURGU2,
@@ -420,7 +461,7 @@ class MailOnizleme(ctk.CTkToplevel):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AYARLAR PENCERESİ — 3 SEKME
+# AYARLAR PENCERESİ
 # ══════════════════════════════════════════════════════════════════════════════
 class AyarlarPencere(ctk.CTkToplevel):
     def __init__(self, master):
@@ -430,28 +471,24 @@ class AyarlarPencere(ctk.CTkToplevel):
         self.minsize(700, 580)
         self.configure(fg_color=RENK_ANA_ARKA)
         self.grab_set()
-        self._gruplar       = []   # WhatsApp'tan gelen grup listesi
-        self._kart_list     = []
+        self._kart_list = []
+        self._grup_widget_tipi = "entry"
         self._build()
 
     def _build(self):
-        # Başlık
         hdr = ctk.CTkFrame(self, fg_color=RENK_PANEL, height=52, corner_radius=0)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
         ctk.CTkLabel(hdr, text="⚙  Ayarlar",
                      font=("Segoe UI", 16, "bold"),
                      text_color=RENK_YAZI).pack(side="left", padx=16, pady=12)
 
-        # Sekme çubuğu
         self.tab = ctk.CTkTabview(self, fg_color=RENK_PANEL,
                                    segmented_button_fg_color=RENK_KART,
                                    segmented_button_selected_color=RENK_VURGU,
                                    segmented_button_selected_hover_color=RENK_VURGU2,
                                    segmented_button_unselected_color=RENK_KART,
                                    segmented_button_unselected_hover_color=RENK_SINIR,
-                                   text_color=RENK_YAZI,
-                                   corner_radius=10)
+                                   text_color=RENK_YAZI, corner_radius=10)
         self.tab.pack(fill="both", expand=True, padx=14, pady=(8, 4))
         self.tab.add("📱  WhatsApp")
         self.tab.add("🔑  Kurallar")
@@ -461,85 +498,41 @@ class AyarlarPencere(ctk.CTkToplevel):
         self._build_kurallar_tab(self.tab.tab("🔑  Kurallar"))
         self._build_outlook_tab(self.tab.tab("✉   Outlook"))
 
-        # Kaydet
         ctk.CTkButton(self, text="💾  Kaydet & Kapat",
                       fg_color=RENK_YESIL, hover_color="#17a844",
                       font=("Segoe UI", 13, "bold"), height=42,
                       command=self._kaydet).pack(fill="x", padx=14, pady=(4, 14))
 
-    # ── SEKME 1: WhatsApp ────────────────────────────────────────────────────
+    # ── WhatsApp Sekmesi ─────────────────────────────────────────────────────
     def _build_wa_tab(self, parent):
         parent.configure(fg_color=RENK_PANEL)
 
-        # Bağlantı durumu kartı
-        durum_kart = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
-        durum_kart.pack(fill="x", padx=10, pady=(10, 6))
+        # Bilgi kartı
+        info = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
+        info.pack(fill="x", padx=10, pady=(10, 6))
+        ctk.CTkLabel(info, text="WhatsApp Desktop Kullanımı",
+                     font=("Segoe UI", 12, "bold"),
+                     text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(12, 4))
 
-        durum_ic = ctk.CTkFrame(durum_kart, fg_color=RENK_KART)
-        durum_ic.pack(fill="x", padx=14, pady=12)
-        durum_ic.columnconfigure(1, weight=1)
+        adimlar = [
+            ("1", "Microsoft Store'dan WhatsApp Desktop'ı indirin ve kurun."),
+            ("2", "WhatsApp Desktop'ı açın ve telefonla QR okutarak giriş yapın."),
+            ("3", "Aşağıya grup adını yazın (tam olarak WhatsApp'taki gibi)."),
+            ("4", "Bot Başlat'a basın — program grubu otomatik bulur."),
+            ("5", "WhatsApp Desktop açık kaldığı sürece bot çalışır."),
+        ]
+        for no, metin in adimlar:
+            row = ctk.CTkFrame(info, fg_color=RENK_KART)
+            row.pack(fill="x", padx=14, pady=3)
+            ctk.CTkLabel(row, text=no, width=24, height=24,
+                         fg_color=RENK_VURGU, corner_radius=12,
+                         font=("Segoe UI", 10, "bold"),
+                         text_color="white").pack(side="left")
+            ctk.CTkLabel(row, text=metin, text_color=RENK_YAZI,
+                         font=("Segoe UI", 10)).pack(side="left", padx=10)
+        ctk.CTkFrame(info, height=8, fg_color=RENK_KART).pack()
 
-        ctk.CTkLabel(durum_ic, text="Bağlantı Durumu:",
-                     text_color=RENK_YAZI2, font=("Segoe UI", 11)
-                     ).grid(row=0, column=0, sticky="w")
-
-        # Ana penceredeki bot durumunu al
-        app = self.master
-        wa_bagli = (hasattr(app, 'wa_bot') and
-                    app.wa_bot is not None and
-                    app.wa_bot.running)
-        durum_text = "● Bağlı ✓" if wa_bagli else "● Bağlı Değil"
-        durum_renk = RENK_YESIL if wa_bagli else RENK_KIRMIZI
-
-        self.lbl_wa_durum = ctk.CTkLabel(durum_ic, text=durum_text,
-                                          text_color=durum_renk,
-                                          font=("Segoe UI", 12, "bold"))
-        self.lbl_wa_durum.grid(row=0, column=1, sticky="w", padx=10)
-
-        # Bağlan / Yenile butonu
-        btn_f = ctk.CTkFrame(durum_kart, fg_color=RENK_KART)
-        btn_f.pack(fill="x", padx=14, pady=(0, 12))
-        if not wa_bagli:
-            ctk.CTkLabel(btn_f,
-                         text="Bot ana ekrandan Başlat butonuyla başlatılır.\n"
-                              "Başlatınca Chrome açılır ve QR taratılır.",
-                         text_color=RENK_YAZI2, font=("Segoe UI", 10),
-                         justify="left").pack(anchor="w")
-        else:
-            ctk.CTkLabel(btn_f, text="✅ WhatsApp bağlı ve çalışıyor.",
-                         text_color=RENK_YESIL, font=("Segoe UI", 10)
-                         ).pack(anchor="w")
-            ctk.CTkButton(btn_f, text="🔄 Grup Listesini Yenile", height=30,
-                          fg_color=RENK_VURGU, hover_color=RENK_VURGU2,
-                          font=("Segoe UI", 10),
-                          command=self._grupları_yenile).pack(anchor="w", pady=(6, 0))
-
-        # QR adımları (bot bağlı değilse göster)
-        if not wa_bagli:
-            adim_kart = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
-            adim_kart.pack(fill="x", padx=10, pady=6)
-            ctk.CTkLabel(adim_kart, text="WhatsApp Nasıl Bağlanır?",
-                         font=("Segoe UI", 12, "bold"),
-                         text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(12, 6))
-            adimlar = [
-                ("1", "Ana ekranda  ▶ Başlat  butonuna tıklayın."),
-                ("2", "Chrome otomatik açılır ve WhatsApp Web yüklenir."),
-                ("3", "Telefonunuzda WhatsApp → Ayarlar → Bağlı Cihazlar → Cihaz Ekle"),
-                ("4", "Chrome ekranındaki QR kodu telefonla taratın."),
-                ("5", "Bağlantı kurulunca aşağıdan grubu seçebilirsiniz."),
-            ]
-            for no, metin in adimlar:
-                row = ctk.CTkFrame(adim_kart, fg_color=RENK_KART)
-                row.pack(fill="x", padx=14, pady=3)
-                ctk.CTkLabel(row, text=no, width=24, height=24,
-                             fg_color=RENK_VURGU, corner_radius=12,
-                             font=("Segoe UI", 10, "bold"),
-                             text_color="white").pack(side="left")
-                ctk.CTkLabel(row, text=metin, text_color=RENK_YAZI,
-                             font=("Segoe UI", 10)).pack(side="left", padx=10)
-            ctk.CTkFrame(adim_kart, height=10, fg_color=RENK_KART).pack()
-
-        # Grup seçimi
+        # Grup adı girişi
         grup_kart = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         grup_kart.pack(fill="x", padx=10, pady=6)
         ctk.CTkLabel(grup_kart, text="Dinlenecek WhatsApp Grubu",
@@ -547,42 +540,31 @@ class AyarlarPencere(ctk.CTkToplevel):
                      text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(12, 4))
 
         cfg = load_config()
-        kayitli = cfg.get("wa_group_name", "")
+        self.ent_grup = ctk.CTkEntry(
+            grup_kart, fg_color=RENK_PANEL, border_color=RENK_VURGU,
+            text_color=RENK_YAZI, font=("Segoe UI", 12),
+            placeholder_text="örn: Pregate Kayıt Red")
+        self.ent_grup.insert(0, cfg.get("wa_group_name", ""))
+        self.ent_grup.pack(fill="x", padx=14, pady=(0, 4))
 
-        # Bağlıysa dropdown, değilse metin kutusu
-        if wa_bagli and self._gruplar:
-            self.cmb_grup = ctk.CTkComboBox(
-                grup_kart, values=self._gruplar,
-                fg_color=RENK_PANEL, border_color=RENK_SINIR,
-                button_color=RENK_VURGU, text_color=RENK_YAZI,
-                font=("Segoe UI", 11))
-            if kayitli in self._gruplar:
-                self.cmb_grup.set(kayitli)
-            self.cmb_grup.pack(fill="x", padx=14, pady=(0, 12))
-            self._grup_widget_tipi = "combo"
-        else:
-            gf = ctk.CTkFrame(grup_kart, fg_color=RENK_KART)
-            gf.pack(fill="x", padx=14, pady=(0, 4))
-            self.ent_grup = ctk.CTkEntry(
-                gf, fg_color=RENK_PANEL, border_color=RENK_SINIR,
-                text_color=RENK_YAZI, font=("Segoe UI", 11),
-                placeholder_text="Grup adını tam olarak yazın (örn: Pregate Kayıt Red)")
-            self.ent_grup.insert(0, kayitli)
-            self.ent_grup.pack(fill="x")
-            self._grup_widget_tipi = "entry"
-            ctk.CTkLabel(grup_kart,
-                         text="💡 Bot bağlandıktan sonra burası otomatik listeye dönüşür.",
-                         text_color=RENK_YAZI2, font=("Segoe UI", 9)
-                         ).pack(anchor="w", padx=14, pady=(2, 12))
+        ctk.CTkLabel(grup_kart,
+                     text="💡 Grup adı büyük/küçük harf dahil tam olarak girilmeli.",
+                     text_color=RENK_YAZI2, font=("Segoe UI", 9)
+                     ).pack(anchor="w", padx=14, pady=(2, 12))
 
-    def _grupları_yenile(self):
-        app = self.master
-        if hasattr(app, 'wa_bot') and app.wa_bot:
-            app.wa_bot._grup_listele()
-            self.after(2000, lambda: messagebox.showinfo(
-                "Bilgi", "Grup listesi yenilendi."))
+        # WA Desktop indirme linki
+        link_f = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
+        link_f.pack(fill="x", padx=10, pady=6)
+        ctk.CTkLabel(link_f,
+                     text="📥  WhatsApp Desktop indirmek için:",
+                     font=("Segoe UI", 11, "bold"),
+                     text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(10, 2))
+        ctk.CTkLabel(link_f,
+                     text="Microsoft Store'u açın → 'WhatsApp' arayın → Yükleyin",
+                     font=("Segoe UI", 10), text_color=RENK_YAZI2
+                     ).pack(anchor="w", padx=14, pady=(0, 10))
 
-    # ── SEKME 2: Kurallar ────────────────────────────────────────────────────
+    # ── Kurallar Sekmesi ─────────────────────────────────────────────────────
     def _build_kurallar_tab(self, parent):
         parent.configure(fg_color=RENK_PANEL)
 
@@ -615,7 +597,6 @@ class AyarlarPencere(ctk.CTkToplevel):
         frame = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         frame.columnconfigure(1, weight=1)
 
-        # Renkli sol şerit
         ctk.CTkFrame(frame, fg_color=renk, width=5,
                      corner_radius=0).grid(row=0, column=0, rowspan=99, sticky="ns")
 
@@ -623,33 +604,31 @@ class AyarlarPencere(ctk.CTkToplevel):
         body.grid(row=0, column=1, sticky="ew", padx=10, pady=10)
         body.columnconfigure(1, weight=1)
 
-        # Kural adı
         ctk.CTkLabel(body, text="Kural Adı:", text_color=RENK_YAZI2,
                      font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
         ent_ad = ctk.CTkEntry(body, fg_color=RENK_PANEL, border_color=renk,
                                text_color=RENK_YAZI, font=("Segoe UI", 11, "bold"))
         ent_ad.insert(0, kural.get("ad", ""))
         ent_ad.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        ent_ad.bind("<FocusOut>", lambda e, k=kural, w=ent_ad: k.update({"ad": w.get()}))
 
-        # Anahtar kelimeler
         ctk.CTkLabel(body, text="Kelimeler\n(virgülle):", text_color=RENK_YAZI2,
                      font=("Segoe UI", 10)).grid(row=1, column=0, sticky="w", pady=(8, 0))
         ent_kw = ctk.CTkEntry(body, fg_color=RENK_PANEL, border_color=RENK_SINIR,
                                text_color=RENK_YAZI, font=("Segoe UI", 11))
         ent_kw.insert(0, ", ".join(kural.get("keywords", [])))
         ent_kw.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ent_kw.bind("<FocusOut>", lambda e, k=kural, w=ent_kw: k.update({
-            "keywords": [x.strip().lower() for x in w.get().split(",") if x.strip()]}))
 
-        # Mail listesi başlık
+        ctk.CTkLabel(body, text="💡 Büyük/küçük harf ayrımı yoktur.",
+                     text_color=RENK_YAZI2, font=("Segoe UI", 9)
+                     ).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(2, 0))
+
         ml_hdr = ctk.CTkFrame(body, fg_color=RENK_KART)
-        ml_hdr.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 2))
+        ml_hdr.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 2))
         ctk.CTkLabel(ml_hdr, text="Mail Listesi:",
                      text_color=RENK_YAZI2, font=("Segoe UI", 10)).pack(side="left")
 
         ml_frame = ctk.CTkFrame(body, fg_color=RENK_PANEL, corner_radius=6)
-        ml_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
+        ml_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
 
         def render_ml():
             for w in ml_frame.winfo_children():
@@ -681,22 +660,18 @@ class AyarlarPencere(ctk.CTkToplevel):
                           fg_color=renk, hover_color=RENK_VURGU2,
                           font=("Segoe UI", 10), command=ekle
                           ).pack(side="right", padx=(0, 4))
-
         render_ml()
 
-        # Alt butonlar
         btn_row = ctk.CTkFrame(body, fg_color=RENK_KART)
-        btn_row.grid(row=4, column=0, columnspan=2, sticky="e", pady=(8, 0))
-
+        btn_row.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ctk.CTkButton(btn_row, text="👁 Mail Önizle", width=110, height=26,
                       fg_color=RENK_VURGU2, hover_color=RENK_VURGU,
                       font=("Segoe UI", 10),
                       command=lambda k=kural: MailOnizleme(
-                          self, k.get("ad", "?"),
-                          k.get("mail_list", []),
-                          k.get("keywords", []))
+                          self, k.get("ad","?"),
+                          k.get("mail_list",[]),
+                          k.get("keywords",[]))
                       ).pack(side="left", padx=(0, 6))
-
         ctk.CTkButton(btn_row, text="🗑 Sil", width=70, height=26,
                       fg_color=RENK_KIRMIZI, hover_color="#a93226",
                       font=("Segoe UI", 10),
@@ -721,10 +696,9 @@ class AyarlarPencere(ctk.CTkToplevel):
         frame.destroy()
         self._kart_list = [item for item in self._kart_list if item[0] != frame]
 
-    # ── SEKME 3: Outlook ─────────────────────────────────────────────────────
+    # ── Outlook Sekmesi ──────────────────────────────────────────────────────
     def _build_outlook_tab(self, parent):
         parent.configure(fg_color=RENK_PANEL)
-
         ctk.CTkLabel(parent, text="Gönderici Mail Hesabı",
                      font=("Segoe UI", 12, "bold"),
                      text_color=RENK_YAZI).pack(anchor="w", padx=10, pady=(12, 4))
@@ -732,9 +706,9 @@ class AyarlarPencere(ctk.CTkToplevel):
         kart = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         kart.pack(fill="x", padx=10, pady=4)
 
-        cfg     = load_config()
-        secili  = cfg.get("outlook_account", "")
-        hesaplar= outlook_hesaplari()
+        cfg      = load_config()
+        secili   = cfg.get("outlook_account", "")
+        hesaplar = outlook_hesaplari()
 
         if hesaplar:
             ctk.CTkLabel(kart,
@@ -742,18 +716,13 @@ class AyarlarPencere(ctk.CTkToplevel):
                               "Hangi hesaptan mail gönderileceğini seçin:",
                          text_color=RENK_YAZI2, font=("Segoe UI", 10)
                          ).pack(anchor="w", padx=14, pady=(12, 6))
-
             self.cmb_outlook = ctk.CTkComboBox(
                 kart, values=hesaplar,
                 fg_color=RENK_PANEL, border_color=RENK_SINIR,
                 button_color=RENK_VURGU, text_color=RENK_YAZI,
                 font=("Segoe UI", 11), width=400)
-            if secili in hesaplar:
-                self.cmb_outlook.set(secili)
-            else:
-                self.cmb_outlook.set(hesaplar[0])
+            self.cmb_outlook.set(secili if secili in hesaplar else hesaplar[0])
             self.cmb_outlook.pack(padx=14, pady=(0, 4), anchor="w")
-
             ctk.CTkLabel(kart,
                          text="💡 Seçilmezse Outlook'un varsayılan hesabı kullanılır.",
                          text_color=RENK_YAZI2, font=("Segoe UI", 9)
@@ -761,35 +730,21 @@ class AyarlarPencere(ctk.CTkToplevel):
         else:
             ctk.CTkLabel(kart,
                          text="⚠ Outlook hesabı bulunamadı.\n\n"
-                              "Lütfen şunları kontrol edin:\n"
                               "• Outlook uygulaması açık ve oturum açılmış olmalı\n"
                               "• En az bir e-posta hesabı eklenmiş olmalı\n\n"
-                              "Outlook'u açıp bu pencereyi kapatıp tekrar açın.",
+                              "Outlook'u açıp bu pencereyi tekrar açın.",
                          text_color=RENK_SARI, font=("Segoe UI", 11),
                          justify="left").pack(padx=14, pady=14, anchor="w")
             self.cmb_outlook = None
 
-        # Mevcut seçili
-        if secili:
-            ctk.CTkLabel(parent,
-                         text=f"Şu an kayıtlı: {secili}",
-                         text_color=RENK_YAZI2, font=("Segoe UI", 10)
-                         ).pack(anchor="w", padx=10, pady=(6, 0))
-
-        # Test butonu
+        # Test
         test_kart = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
         test_kart.pack(fill="x", padx=10, pady=(12, 4))
         ctk.CTkLabel(test_kart, text="Bağlantı Testi",
                      font=("Segoe UI", 11, "bold"),
                      text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(10, 4))
-        ctk.CTkLabel(test_kart,
-                     text="Kaydet'e bastıktan sonra test maili göndererek\n"
-                          "Outlook bağlantısını doğrulayabilirsiniz.",
-                     text_color=RENK_YAZI2, font=("Segoe UI", 10)
-                     ).pack(anchor="w", padx=14)
         self.lbl_test = ctk.CTkLabel(test_kart, text="",
-                                      font=("Segoe UI", 10),
-                                      text_color=RENK_YESIL)
+                                      font=("Segoe UI", 10), text_color=RENK_YESIL)
         self.lbl_test.pack(anchor="w", padx=14)
         ctk.CTkButton(test_kart, text="📧 Test Maili Gönder", height=32,
                       fg_color=RENK_VURGU, hover_color=RENK_VURGU2,
@@ -797,23 +752,19 @@ class AyarlarPencere(ctk.CTkToplevel):
                       command=self._test_mail).pack(anchor="w", padx=14, pady=(4, 12))
 
     def _test_mail(self):
-        cfg  = load_config()
+        cfg      = load_config()
         from_acc = cfg.get("outlook_account", "")
-        test_to  = from_acc or ""
-        if not test_to:
-            hesaplar = outlook_hesaplari()
-            test_to  = hesaplar[0] if hesaplar else ""
+        hesaplar = outlook_hesaplari()
+        test_to  = from_acc or (hesaplar[0] if hesaplar else "")
         if not test_to:
             self.lbl_test.configure(
                 text="❌ Outlook hesabı bulunamadı.", text_color=RENK_KIRMIZI)
             return
-        ok, info = send_mail(
-            [test_to], "TEST", "Test Kullanıcı",
-            "Bu bir test mesajıdır.", [], "Test Grubu", from_acc or None)
+        ok, info = send_mail([test_to], "TEST", "Test",
+                             "Bu bir test mesajıdır.", [], "Test", from_acc or None)
         if ok:
             self.lbl_test.configure(
-                text=f"✅ Test maili gönderildi → {test_to}",
-                text_color=RENK_YESIL)
+                text=f"✅ Test maili gönderildi → {test_to}", text_color=RENK_YESIL)
         else:
             self.lbl_test.configure(
                 text=f"❌ Hata: {info}", text_color=RENK_KIRMIZI)
@@ -821,26 +772,17 @@ class AyarlarPencere(ctk.CTkToplevel):
     # ── Kaydet ───────────────────────────────────────────────────────────────
     def _kaydet(self):
         cfg = load_config()
-
-        # Grup adı
-        if self._grup_widget_tipi == "combo":
-            cfg["wa_group_name"] = self.cmb_grup.get().strip()
-        else:
-            cfg["wa_group_name"] = self.ent_grup.get().strip()
-
-        # Outlook hesabı
+        cfg["wa_group_name"] = self.ent_grup.get().strip()
         if hasattr(self, 'cmb_outlook') and self.cmb_outlook:
             cfg["outlook_account"] = self.cmb_outlook.get().strip()
-
-        # Kart entry'lerinden güncel değerleri oku
+        # Kart verilerini oku
         kurallar = []
         for (frame, kural, ent_ad, ent_kw) in self._kart_list:
             if frame.winfo_exists():
                 kural["ad"] = ent_ad.get().strip()
                 kural["keywords"] = [
                     x.strip().lower()
-                    for x in ent_kw.get().split(",") if x.strip()
-                ]
+                    for x in ent_kw.get().split(",") if x.strip()]
                 kurallar.append(kural)
         cfg["kurallar"] = kurallar
         save_config(cfg)
@@ -848,7 +790,7 @@ class AyarlarPencere(ctk.CTkToplevel):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RAPOR PENCERESİ
+# RAPOR
 # ══════════════════════════════════════════════════════════════════════════════
 class RaporPencere(ctk.CTkToplevel):
     def __init__(self, master):
@@ -862,22 +804,21 @@ class RaporPencere(ctk.CTkToplevel):
 
     def _build(self):
         hdr = ctk.CTkFrame(self, fg_color=RENK_PANEL, height=50, corner_radius=0)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
         ctk.CTkLabel(hdr, text="📊  Aylık Rapor",
                      font=("Segoe UI", 16, "bold"),
                      text_color=RENK_YAZI).pack(side="left", padx=16)
-        now   = datetime.now()
-        yillar= [str(y) for y in range(now.year - 2, now.year + 1)]
-        aylar = ["Ocak","Şubat","Mart","Nisan","Mayıs","Haziran",
-                 "Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"]
+        now    = datetime.now()
+        yillar = [str(y) for y in range(now.year - 2, now.year + 1)]
+        aylar  = ["Ocak","Şubat","Mart","Nisan","Mayıs","Haziran",
+                  "Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"]
         nav = ctk.CTkFrame(self, fg_color=RENK_PANEL, corner_radius=8)
         nav.pack(fill="x", padx=14, pady=(10, 6))
         self.cmb_yil = ctk.CTkComboBox(nav, values=yillar, width=90,
             fg_color=RENK_KART, border_color=RENK_SINIR,
             button_color=RENK_VURGU, text_color=RENK_YAZI)
         self.cmb_yil.set(str(now.year))
-        self.cmb_yil.pack(side="left", padx=(12, 4), pady=8)
+        self.cmb_yil.pack(side="left", padx=(12,4), pady=8)
         self.cmb_ay = ctk.CTkComboBox(nav, values=aylar, width=120,
             fg_color=RENK_KART, border_color=RENK_SINIR,
             button_color=RENK_VURGU, text_color=RENK_YAZI)
@@ -887,16 +828,15 @@ class RaporPencere(ctk.CTkToplevel):
                       fg_color=RENK_VURGU, hover_color=RENK_VURGU2,
                       command=self._ara).pack(side="left", padx=8)
         self.frm_ozet = ctk.CTkFrame(self, fg_color=RENK_ANA_ARKA)
-        self.frm_ozet.pack(fill="x", padx=14, pady=(0, 6))
+        self.frm_ozet.pack(fill="x", padx=14, pady=(0,6))
         tbl = ctk.CTkFrame(self, fg_color=RENK_PANEL, corner_radius=8)
-        tbl.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        style = ttk.Style()
-        style.theme_use("default")
+        tbl.pack(fill="both", expand=True, padx=14, pady=(0,14))
+        style = ttk.Style(); style.theme_use("default")
         style.configure("Dark.Treeview", background=RENK_KART,
-                        foreground=RENK_YAZI, fieldbackground=RENK_KART,
-                        rowheight=26, font=("Segoe UI", 10))
+            foreground=RENK_YAZI, fieldbackground=RENK_KART,
+            rowheight=26, font=("Segoe UI",10))
         style.configure("Dark.Treeview.Heading", background=RENK_PANEL,
-                        foreground=RENK_YAZI2, font=("Segoe UI", 10, "bold"))
+            foreground=RENK_YAZI2, font=("Segoe UI",10,"bold"))
         style.map("Dark.Treeview", background=[("selected", RENK_VURGU)])
         cols = ("Tarih","Gönderen","Kural","Mesaj","Resim")
         self.tree = ttk.Treeview(tbl, columns=cols, show="headings",
@@ -912,23 +852,21 @@ class RaporPencere(ctk.CTkToplevel):
     def _ara(self):
         aylar = ["Ocak","Şubat","Mart","Nisan","Mayıs","Haziran",
                  "Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"]
-        self._goster(int(self.cmb_yil.get()),
-                     aylar.index(self.cmb_ay.get()) + 1)
+        self._goster(int(self.cmb_yil.get()), aylar.index(self.cmb_ay.get())+1)
 
     def _goster(self, yil, ay):
         rows, gunluk = db_rapor(yil, ay)
-        for w in self.frm_ozet.winfo_children():
-            w.destroy()
+        for w in self.frm_ozet.winfo_children(): w.destroy()
         toplam = len(rows)
         self._kart("Toplam Red", str(toplam), RENK_KIRMIZI)
-        gun_s = len(gunluk)
-        self._kart("Günlük Ort.", str(round(toplam/gun_s,1) if gun_s else 0), RENK_SARI)
+        gs = len(gunluk)
+        self._kart("Günlük Ort.", str(round(toplam/gs,1) if gs else 0), RENK_SARI)
         if gunluk:
             en = max(gunluk, key=gunluk.get)
             self._kart("En Yoğun Gün", f"{en}\n({gunluk[en]})", RENK_VURGU)
         self.tree.delete(*self.tree.get_children())
         for r in rows:
-            self.tree.insert("", "end", values=(
+            self.tree.insert("","end", values=(
                 r[0][:19].replace("T"," "), r[1], r[2],
                 (r[3] or "")[:60], "📎 Var" if r[4] else "—"))
 
@@ -951,19 +889,18 @@ class SplashEkran(tk.Toplevel):
         self.configure(bg="#071320")
         self.attributes("-topmost", True)
         W, H = 600, 340
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
+        sw = self.winfo_screenwidth(); sh = self.winfo_screenheight()
         self.geometry(f"{W}x{H}+{(sw-W)//2}+{(sh-H)//2}")
-        splash_path = os.path.join(BASE_DIR, "splash.png")
-        if PIL_OK and os.path.exists(splash_path):
-            img = Image.open(splash_path).resize((W, H), Image.LANCZOS)
+        p = os.path.join(BASE_DIR, "splash.png")
+        if PIL_OK and os.path.exists(p):
+            img = Image.open(p).resize((W,H), Image.LANCZOS)
             self._photo = ImageTk.PhotoImage(img)
             tk.Label(self, image=self._photo, bg="#071320", bd=0
                      ).pack(fill="both", expand=True)
         else:
             tk.Label(self, text="Pregate Kayıt Red\nWA → Mail Botu",
-                     font=("Segoe UI",20,"bold"),
-                     fg="#e8f0f7", bg="#071320").pack(expand=True)
+                     font=("Segoe UI",20,"bold"), fg="#e8f0f7",
+                     bg="#071320").pack(expand=True)
             tk.Label(self, text="S.SEYMEN tarafından hazırlanmıştır",
                      font=("Segoe UI",11), fg="#8faabf",
                      bg="#071320").pack(pady=(0,20))
@@ -972,15 +909,13 @@ class SplashEkran(tk.Toplevel):
         bf.place(x=0, y=H-4, width=W, height=4)
         self._bar = tk.Frame(bf, bg="#1a6ea8", height=4)
         self._bar.place(x=0, y=0, width=0, height=4)
-        self._W = W; self._step = 0
-        self._animate()
+        self._W=W; self._step=0; self._animate()
 
     def _animate(self):
         self._step += 1
-        self._bar.place(x=0, y=0,
-                        width=min(int((self._step/30)*self._W), self._W), height=4)
-        if self._step < 30:
-            self.after(50, self._animate)
+        self._bar.place(x=0,y=0,
+                        width=min(int((self._step/30)*self._W),self._W),height=4)
+        if self._step < 30: self.after(50, self._animate)
 
     def kapat(self): self.destroy()
 
@@ -993,7 +928,7 @@ class App(ctk.CTk):
         super().__init__()
         self.title("Pregate Kayıt Red – WA Mail Botu  |  Poliport")
         self.geometry("900x620")
-        self.minsize(800, 540)
+        self.minsize(800,540)
         self.configure(fg_color=RENK_ANA_ARKA)
         self.wa_bot   = None
         self.running  = False
@@ -1013,11 +948,9 @@ class App(ctk.CTk):
         self.lbl_durum.pack(side="right", padx=20)
         content = ctk.CTkFrame(self, fg_color=RENK_ANA_ARKA)
         content.pack(fill="both", expand=True, padx=14, pady=10)
-        content.columnconfigure(0, weight=0)
-        content.columnconfigure(1, weight=1)
+        content.columnconfigure(0,weight=0); content.columnconfigure(1,weight=1)
         content.rowconfigure(0, weight=1)
-        self._build_sol(content)
-        self._build_sag(content)
+        self._build_sol(content); self._build_sag(content)
 
     def _build_sol(self, parent):
         sol = ctk.CTkFrame(parent, fg_color=RENK_PANEL, corner_radius=10, width=200)
@@ -1034,7 +967,7 @@ class App(ctk.CTk):
             font=("Segoe UI",13,"bold"), height=42,
             state="disabled", command=self._durdur)
         self.btn_durdur.pack(fill="x", padx=12, pady=4)
-        ctk.CTkFrame(sol, height=1, fg_color=RENK_SINIR).pack(fill="x", padx=12, pady=12)
+        ctk.CTkFrame(sol,height=1,fg_color=RENK_SINIR).pack(fill="x",padx=12,pady=12)
         ctk.CTkButton(sol, text="⚙  Ayarlar", height=36,
                       fg_color=RENK_VURGU, hover_color=RENK_VURGU2,
                       font=("Segoe UI",12), command=self._ayarlar
@@ -1043,7 +976,7 @@ class App(ctk.CTk):
                       fg_color="#2c3e6b", hover_color="#1e2d50",
                       font=("Segoe UI",12), command=self._rapor
                       ).pack(fill="x", padx=12, pady=4)
-        ctk.CTkFrame(sol, height=1, fg_color=RENK_SINIR).pack(fill="x", padx=12, pady=12)
+        ctk.CTkFrame(sol,height=1,fg_color=RENK_SINIR).pack(fill="x",padx=12,pady=12)
         f1 = ctk.CTkFrame(sol, fg_color=RENK_KART, corner_radius=8)
         f1.pack(fill="x", padx=12, pady=4)
         ctk.CTkLabel(f1, text="Bugün Gönderilen",
@@ -1061,11 +994,10 @@ class App(ctk.CTk):
     def _build_sag(self, parent):
         sag = ctk.CTkFrame(parent, fg_color=RENK_PANEL, corner_radius=10)
         sag.grid(row=0, column=1, sticky="nsew")
-        sag.columnconfigure(0, weight=1)
-        sag.rowconfigure(1, weight=1)
+        sag.columnconfigure(0, weight=1); sag.rowconfigure(1, weight=1)
         ctk.CTkLabel(sag, text="İŞLEM LOGU", font=("Segoe UI",11,"bold"),
-                     text_color=RENK_YAZI2).grid(row=0, column=0,
-                                                  sticky="w", padx=14, pady=(14,4))
+                     text_color=RENK_YAZI2).grid(row=0,column=0,
+                                                  sticky="w",padx=14,pady=(14,4))
         self.txt_log = ctk.CTkTextbox(sag, fg_color=RENK_KART,
                                        text_color=RENK_YAZI,
                                        font=("Consolas",10), corner_radius=8)
@@ -1073,42 +1005,34 @@ class App(ctk.CTk):
 
     def _baslat(self):
         cfg = load_config()
+        if not cfg.get("wa_group_name","").strip():
+            messagebox.showwarning("Uyarı","Ayarlar → WhatsApp'tan grup adını girin!")
+            return
         if not cfg.get("kurallar"):
             messagebox.showwarning("Uyarı","Ayarlar → Kurallar'dan en az bir kural ekleyin!")
             return
         self.running = True
         self.btn_baslat.configure(state="disabled")
         self.btn_durdur.configure(state="normal")
-        self._log("🚀 Bot başlatılıyor, Chrome penceresi açılacak…")
-        self.wa_bot = WhatsAppBot(
+        self._log("🚀 Bot başlatılıyor…")
+        self.wa_bot = WADesktopBot(
             on_log=self._log,
             on_status=self._set_durum_p,
-            on_message=self._on_message,
-            on_groups=self._on_groups)
+            on_message=self._on_message)
         threading.Thread(target=self.wa_bot.start, daemon=True).start()
 
     def _durdur(self):
         self.running = False
-        if self.wa_bot:
-            self.wa_bot.stop(); self.wa_bot = None
+        if self.wa_bot: self.wa_bot.stop(); self.wa_bot = None
         self.btn_baslat.configure(state="normal")
         self.btn_durdur.configure(state="disabled")
         self._set_durum("● Durduruldu", RENK_KIRMIZI)
         self._log("■ Bot durduruldu.")
 
-    def _on_groups(self, gruplar):
-        """WhatsApp'tan gelen grup listesini config'e henüz seçilmediyse kaydet."""
-        cfg = load_config()
-        if not cfg.get("wa_group_name") and gruplar:
-            self._log(f"📋 {len(gruplar)} grup bulundu. Ayarlar → WhatsApp'tan seçin.")
-
     def _ayarlar(self):
         AyarlarPencere(self)
-        self.after(500, self._grup_label_guncelle)
-
-    def _grup_label_guncelle(self):
-        cfg = load_config()
-        self.lbl_grup.configure(text=f"Grup: {cfg.get('wa_group_name','—')}")
+        self.after(500, lambda: self.lbl_grup.configure(
+            text=f"Grup: {load_config().get('wa_group_name','—')}"))
 
     def _rapor(self): RaporPencere(self)
 
@@ -1120,9 +1044,12 @@ class App(ctk.CTk):
             for kw in kural.get("keywords", []):
                 if kw.lower() in metin_lower:
                     eslesen.append(kural); break
+
         if not eslesen:
-            self._log(f"💬 Mesaj geldi, eşleşme yok: {text[:50]}"); return
-        from_acc = cfg.get("outlook_account", "") or None
+            self._log(f"💬 [{gonderen}]: {text[:50]} — eşleşme yok")
+            return
+
+        from_acc = cfg.get("outlook_account","") or None
         for kural in eslesen:
             ml = kural.get("mail_list", [])
             if not ml:
@@ -1131,11 +1058,11 @@ class App(ctk.CTk):
                                  img_paths, cfg.get("wa_group_name",""), from_acc)
             if ok:
                 self.mail_say += 1
-                self.after(0, lambda: self.lbl_sayac.configure(text=str(self.mail_say)))
+                self.after(0, lambda: self.lbl_sayac.configure(
+                    text=str(self.mail_say)))
                 db_ekle(gonderen, kural["ad"], text, bool(img_paths))
                 self._log(f"✉ [{kural['ad']}] {gonderen} → "
-                          f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}"
-                          f"{'  📎' if img_paths else ''}")
+                          f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}")
             else:
                 self._log(f"❌ [{kural['ad']}] Mail hatası: {info}")
 
@@ -1149,10 +1076,10 @@ class App(ctk.CTk):
         self.after(0, _do)
 
     def _set_durum(self, text, color):
-        self.after(0, lambda: self.lbl_durum.configure(text=text, text_color=color))
+        self.after(0, lambda: self.lbl_durum.configure(
+            text=text, text_color=color))
 
-    def _set_durum_p(self, _, text, color):
-        self._set_durum(text, color)
+    def _set_durum_p(self, _, text, color): self._set_durum(text, color)
 
     def on_close(self):
         if self.wa_bot: self.wa_bot.stop()
@@ -1160,10 +1087,8 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()
-    splash = SplashEkran(root)
-    splash.update()
+    root = tk.Tk(); root.withdraw()
+    splash = SplashEkran(root); splash.update()
     def _ac():
         splash.kapat(); root.destroy()
         app = App()

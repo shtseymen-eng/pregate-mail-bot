@@ -18,22 +18,22 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Python bagimliliklar
-        run: pip install customtkinter selenium pyinstaller pywin32 webdriver-manager pillow
+      - name: Bagimliliklar
+        run: pip install customtkinter pyinstaller pywin32 pyautogui pyperclip pillow
 
-      - name: Ikon ICO olustur
+      - name: Ikon olustur
         run: python make_ico.py
 
-      - name: PyInstaller ile derle
+      - name: PyInstaller
         run: pyinstaller wa_mail_bot.spec
 
       - name: Inno Setup kur
         run: choco install innosetup --yes
 
-      - name: Kurulum paketi olustur
+      - name: Setup paketi olustur
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss'
 
-      - name: Kurulum EXE yukle
+      - name: Artifact yukle
         uses: actions/upload-artifact@v4
         with:
           name: PregateMail_Kurulum
