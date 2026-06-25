@@ -235,12 +235,10 @@ class WABot:
             self._dinle()
         else:
             self.on_log("⚠ WhatsApp Desktop DB bulunamadı.")
-            self.on_log("   → Microsoft Store'dan WhatsApp indirin ve açın.")
-            self.on_log("   → Bir mesaj alındıktan sonra tekrar başlatın.")
+            self._wa_tum_dosyalari_logla()
             self.on_status("WARN", "● DB Bulunamadı", RENK_KIRMIZI)
-            # 60 sn'de bir tekrar dene
             while self.running:
-                time.sleep(60)
+                time.sleep(30)
                 db = self._wa_db_bul()
                 if db:
                     self._wa_db = db
@@ -274,6 +272,29 @@ class WABot:
                     if "messages.db" in files:
                         return os.path.join(root,"messages.db")
         return None
+
+    def _wa_tum_dosyalari_logla(self):
+        """DB bulunamazsa tüm WA paket içeriğini logla — debug için."""
+        appdata = os.environ.get("LOCALAPPDATA","")
+        pkg_dir = os.path.join(appdata,"Packages")
+        self.on_log("🔍 WA paket klasörleri taranıyor…")
+        bulundu = False
+        if os.path.exists(pkg_dir):
+            for d in os.listdir(pkg_dir):
+                if "whatsapp" in d.lower():
+                    bulundu = True
+                    self.on_log(f"📁 Paket: {d}")
+                    tam = os.path.join(pkg_dir, d)
+                    for root, dirs, files in os.walk(tam):
+                        seviye = root.replace(tam,"").count(os.sep)
+                        if seviye > 4: continue
+                        for f in files:
+                            if f.endswith((".db",".sqlite",".sqlite3",".ldb")):
+                                yol = os.path.join(root,f)
+                                self.on_log(f"   💾 {yol.replace(pkg_dir,'')}")
+        if not bulundu:
+            self.on_log("❌ Hiç WhatsApp paketi bulunamadı!")
+            self.on_log("   Microsoft Store → WhatsApp Desktop yükleyin.")
 
     def _db_kesfet(self):
         """DB şemasını keşfet — tablo ve sütun isimlerini bul."""
