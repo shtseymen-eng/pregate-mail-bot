@@ -462,24 +462,34 @@ class WABot:
                 # Boş göndereni atla (sistem mesajları)
                 if not sender or sender == "Bilinmiyor":
                     continue
-                # Anahtar kelime kontrolü — eşleşme yoksa biriktiriciye ekleme
+
+                # Metin yoksa ama resim varsa metni placeholder yap
+                if not text and img_paths:
+                    text = "(Resim gönderildi)"
+
+                if not text:
+                    continue
+
+                # Anahtar kelime kontrolü — Türkçe normalize
+                def _norm(s):
+                    return s.lower().replace("ı","i").replace("ğ","g")\
+                        .replace("ü","u").replace("ş","s").replace("ö","o")\
+                        .replace("ç","c")
                 cfg_check = load_config()
-                # Türkçe karakter duyarsız karşılaştırma
-                metin_l = text.lower().replace("ı","i").replace("ğ","g")\
-                    .replace("ü","u").replace("ş","s").replace("ö","o")\
-                    .replace("ç","c")
+                metin_n = _norm(text)
                 eslesen_kw = False
                 for kural in cfg_check.get("kurallar",[]):
                     for kw in kural.get("keywords",[]):
-                        kw_n = kw.lower().replace("ı","i").replace("ğ","g")\
-                            .replace("ü","u").replace("ş","s").replace("ö","o")\
-                            .replace("ç","c")
-                        if kw_n in metin_l:
+                        if _norm(kw) in metin_n:
                             eslesen_kw = True; break
                     if eslesen_kw: break
+
                 if not eslesen_kw:
-                    continue  # Anahtar kelime yok, atla
-                self.on_log(f"📩 [{sender}]: {text[:60]}" + (f"  📎{len(img_paths)}resim" if img_paths else ""))
+                    self.on_log(f"💬 [{sender}]: eşleşme yok — {text[:40]}")
+                    continue
+
+                self.on_log(f"📩 [{sender}]: {text[:60]}"
+                            + (f"  📎{len(img_paths)}resim" if img_paths else ""))
                 self._biriktiric.ekle(sender, text, img_paths)
 
         except Exception as e:
