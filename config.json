@@ -1,25 +1,27 @@
 {
   "wa_group_name": "Pregate Kayıt Red",
+  "bekleme_dk": 2,
+  "outlook_account": "",
   "kurallar": [
     {
       "id": "poliport",
-      "ad": "Port / Poliport",
-      "keywords": ["poliport", "port", "polisan"],
+      "ad": "POLİPORT",
+      "keywords": ["poliport", "port"],
       "mail_list": [
-        "pregatearackontrol@poliport.com",
+        "pregatearackontrol@polisan.com.tr",
+        "gtanriverdi@poliport.com",
         "sseymen@poliport.com",
-        "g.tanrıverdi@poliport.com",
         "terminalsevkiyat@polisan.com.tr"
       ]
     },
     {
       "id": "kimya",
-      "ad": "Kimya Sevkiyat",
-      "keywords": ["kimya", "sevkiyat", "yapıkim", "yapikim"],
+      "ad": "POLİSAN KİMYA",
+      "keywords": ["polisan", "kimya", "yapıkim", "yapikim", "polisaha"],
       "mail_list": [
-        "pregatearackontrol@poliport.com",
+        "pregatearackontrol@polisan.com.tr",
+        "gtanriverdi@poliport.com",
         "sseymen@poliport.com",
-        "g.tanrıverdi@poliport.com",
         "k.sevkiyat@polisankimya.com"
       ]
     }
