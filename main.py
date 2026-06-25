@@ -179,24 +179,32 @@ class MesajBiriktiric:
         self._kuyruk   = {}
         self._lock     = threading.Lock()
 
-    def ekle(self, gonderen, metin):
+    def ekle(self, gonderen, metin, img_paths=None):
+        """Yeni mesaj geldi — biriktiriciye ekle, timer sıfırla."""
         with self._lock:
             if gonderen not in self._kuyruk:
-                self._kuyruk[gonderen] = {"metinler":[], "timer":None}
+                self._kuyruk[gonderen] = {
+                    "metinler": [], "resimler": [], "timer": None}
             self._kuyruk[gonderen]["metinler"].append(metin)
+            if img_paths:
+                self._kuyruk[gonderen]["resimler"].extend(img_paths)
             t = self._kuyruk[gonderen]["timer"]
             if t: t.cancel()
-            yeni_t = threading.Timer(self.bekleme, self._gonder, args=[gonderen])
+            yeni_t = threading.Timer(
+                self.bekleme, self._gonder, args=[gonderen])
             yeni_t.daemon = True
             yeni_t.start()
             self._kuyruk[gonderen]["timer"] = yeni_t
 
     def _gonder(self, gonderen):
+        """Bekleme süresi doldu — biriken mesajları ve resimleri gönder."""
         with self._lock:
             if gonderen not in self._kuyruk: return
-            metinler = self._kuyruk.pop(gonderen)["metinler"]
+            veri     = self._kuyruk.pop(gonderen)
+            metinler = veri["metinler"]
+            resimler = veri["resimler"]
         if metinler:
-            self.on_gonder(gonderen, "\n".join(metinler))
+            self.on_gonder(gonderen, "\n".join(metinler), resimler)
 
     def temizle(self):
         with self._lock:
