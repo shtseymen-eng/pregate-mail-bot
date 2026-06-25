@@ -441,40 +441,53 @@ class WABot:
             if not mesajlar:
                 return
 
-            for m in mesajlar:
-                msg_id  = m.get("id","")
-                text    = m.get("text","").strip()
-                sender  = m.get("sender","Bilinmiyor").strip()
+            now_ts = time.time()
+            self._seen = {k:v for k,v in self._seen.items() if now_ts-v < 7200}
 
-                if not msg_id:
-                    continue
-                # 2 saatten eski seen kayıtlarını temizle
-                now_ts = time.time()
-                self._seen = {k:v for k,v in self._seen.items()
-                             if now_ts - v < 7200}
-                if msg_id in self._seen:
+            def _norm(s):
+                return s.lower().replace("ı","i").replace("ğ","g")\
+                    .replace("ü","u").replace("ş","s").replace("ö","o")\
+                    .replace("ç","c")
+
+            for m in mesajlar:
+                msg_id   = m.get("id","")
+                text     = m.get("text","").strip()
+                sender   = m.get("sender","Bilinmiyor").strip()
+                img_urls = m.get("imgUrls",[])
+
+                if not msg_id or msg_id in self._seen:
                     continue
                 self._seen[msg_id] = now_ts
 
-                if not text:
-                    continue
-
-                # Boş göndereni atla (sistem mesajları)
+                # Boş göndereni atla
                 if not sender or sender == "Bilinmiyor":
                     continue
 
-                # Metin yoksa ama resim varsa metni placeholder yap
+                # Resimleri indir
+                img_paths = []
+                for url in img_urls[:3]:
+                    try:
+                        if url.startswith("blob:"):
+                            import base64 as _b64
+                            data = self._driver.execute_async_script(
+                                self.JS_BLOB_TO_B64, url)
+                            if data and "," in data:
+                                raw = _b64.b64decode(data.split(",")[1])
+                                ext = ".png" if "png" in data[:30] else ".jpg"
+                                import tempfile as _tmp
+                                p = os.path.join(_tmp.gettempdir(),
+                                    f"wa_{int(time.time()*1000)}{ext}")
+                                with open(p,"wb") as f: f.write(raw)
+                                img_paths.append(p)
+                    except: pass
+
+                # Metin yoksa resim var mı bak
                 if not text and img_paths:
                     text = "(Resim gönderildi)"
-
                 if not text:
                     continue
 
-                # Anahtar kelime kontrolü — Türkçe normalize
-                def _norm(s):
-                    return s.lower().replace("ı","i").replace("ğ","g")\
-                        .replace("ü","u").replace("ş","s").replace("ö","o")\
-                        .replace("ç","c")
+                # Anahtar kelime kontrolü
                 cfg_check = load_config()
                 metin_n = _norm(text)
                 eslesen_kw = False
@@ -489,7 +502,7 @@ class WABot:
                     continue
 
                 self.on_log(f"📩 [{sender}]: {text[:60]}"
-                            + (f"  📎{len(img_paths)}resim" if img_paths else ""))
+                            + (f"  📎{len(img_paths)}" if img_paths else ""))
                 self._biriktiric.ekle(sender, text, img_paths)
 
         except Exception as e:
