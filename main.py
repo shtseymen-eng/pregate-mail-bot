@@ -250,27 +250,25 @@ class WABot:
                     return
 
     def _wa_db_bul(self):
-        # Doğrudan yollar
-        for p in self.WA_DB_PATTERNS:
-            expanded = os.path.expandvars(p)
-            if os.path.exists(expanded):
-                return expanded
-        # Wildcard — her iki paket adını dene
-        appdata = os.environ.get("LOCALAPPDATA", "")
-        for pkg in ["5319275A.WhatsAppDesktop*", "5319275A.WhatsApp*"]:
-            base = os.path.join(appdata, "Packages", pkg)
-            for sub in [
-                ("LocalState", "messages.db"),
-                ("LocalState", "*", "messages.db"),
-            ]:
-                pat = os.path.join(base, *sub)
-                found = glob.glob(pat)
-                if found: return found[0]
-            # Rekürsif arama
-            for pat in glob.glob(os.path.join(appdata,"Packages",pkg)):
-                for root,dirs,files in os.walk(pat):
-                    if "messages.db" in files:
-                        return os.path.join(root,"messages.db")
+        """WhatsApp Desktop DB'sini bul.
+        Yeni WA Desktop mesajları sessions/<hash>/ altında saklar.
+        """
+        appdata = os.environ.get("LOCALAPPDATA","")
+        for pkg in [self.WA_PKG, self.WA_PKG_OLD, "5319275A.WhatsAppDesktop*",
+                    "5319275A.WhatsApp*"]:
+            pkg_path_list = glob.glob(os.path.join(appdata,"Packages",pkg))
+            for pkg_path in pkg_path_list:
+                # Tüm alt klasörleri tara — sessions dahil
+                for root,dirs,files in os.walk(pkg_path):
+                    for db_name in self.WA_DB_NAMES:
+                        if db_name in files:
+                            return os.path.join(root, db_name)
+        # Standalone kurulum
+        for p in [
+            os.path.join(appdata,"WhatsApp","messages.db"),
+            os.path.join(os.environ.get("APPDATA",""),"WhatsApp","messages.db"),
+        ]:
+            if os.path.exists(p): return p
         return None
 
     def _wa_tum_dosyalari_logla(self):
@@ -297,7 +295,9 @@ class WABot:
             self.on_log("   Microsoft Store → WhatsApp Desktop yükleyin.")
 
     def _db_kesfet(self):
-        """DB şemasını keşfet — tablo ve sütun isimlerini bul."""
+        """DB şemasını keşfet — tablo ve sütun isimlerini bul.
+        WA Desktop yeni versiyonda mesajlar genericStorage.db içinde.
+        """
         try:
             con = _sqlite3.connect(
                 f"file:{self._wa_db}?mode=ro&nolock=1", uri=True, timeout=5)
@@ -305,32 +305,40 @@ class WABot:
 
             tabloler = [r[0] for r in cur.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-            self.on_log(f"📊 DB tabloları: {', '.join(tabloler)}")
+            self.on_log(f"📊 {os.path.basename(self._wa_db)} tabloları: {', '.join(tabloler)}")
 
-            # Mesaj tablosunu bul
-            for tbl in ["messages", "message", "msgs", "chat_messages"]:
+            # Önce bilinen mesaj tablolarını dene
+            for tbl in ["messages","message","msgs","chat_messages",
+                        "kv","key_value","storage","data"]:
                 if tbl in tabloler:
-                    self._tablo = tbl
-                    break
+                    self._tablo = tbl; break
 
             if not self._tablo and tabloler:
                 # En fazla satırı olan tabloyu seç
                 max_count = 0
                 for tbl in tabloler:
                     try:
-                        c = cur.execute(f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]
+                        c = cur.execute(
+                            f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]
                         if c > max_count:
-                            max_count = c; self._tablo = tbl
+                            max_count=c; self._tablo=tbl
                     except: pass
 
             if self._tablo:
                 cols = [r[1] for r in cur.execute(
                     f"PRAGMA table_info([{self._tablo}])").fetchall()]
-                self.on_log(f"📋 Tablo: {self._tablo} | Sütunlar: {', '.join(cols)}")
+                self.on_log(f"📋 Tablo: {self._tablo}")
+                self.on_log(f"   Sütunlar: {', '.join(cols)}")
                 self._kolon_map = self._sütun_haritasi(cols)
-                self.on_log(f"🗺 Harita: {self._kolon_map}")
+
+                # genericStorage.db için özel kontrol
+                if "generic" in self._wa_db.lower() or "kv" in tabloler:
+                    self.on_log("ℹ genericStorage DB — anahtar-değer formatı")
+                    self._mod = "kv"
+                else:
+                    self._mod = "normal"
             else:
-                self.on_log("⚠ Mesaj tablosu bulunamadı!")
+                self.on_log("⚠ Tablo bulunamadı!")
             con.close()
         except Exception as e:
             self.on_log(f"⚠ DB keşif hatası: {e}")
@@ -407,37 +415,51 @@ class WABot:
                 self._son_id = max(self._son_id, row["rowid"])
                 d = dict(row)
 
-                # Sütun haritasını kullan
-                chat   = str(d.get(self._kolon_map.get("chat",""), "") or "").lower()
-                sender = str(d.get(self._kolon_map.get("sender",""), "") or "Bilinmiyor")
-                text   = str(d.get(self._kolon_map.get("text",""), "") or "")
-
-                # Eğer harita boşsa tüm string sütunlara bak
-                if not self._kolon_map.get("text"):
-                    for k, v in d.items():
-                        if isinstance(v, str) and len(v) > 2 and k not in (
-                                "rowid","id","key_id","_id"):
-                            text = v; break
-
-                # Grup filtresi
-                if hedef_grup and hedef_grup not in chat:
-                    # Chat alanı boşsa yine de işle (bazı DB'lerde join gerekir)
-                    if chat:
+                # genericStorage (kv) modunda tüm değerleri tara
+                mod = getattr(self, "_mod", "normal")
+                if mod == "kv":
+                    # key-value formatı: anahtar kelime ara
+                    val = str(d.get("value") or d.get("val") or
+                             d.get("data") or "")
+                    if not val or len(val) < 3: continue
+                    # JSON içinde metin ara
+                    import json as _json
+                    try:
+                        parsed = _json.loads(val)
+                        if isinstance(parsed, dict):
+                            text = (parsed.get("text") or
+                                    parsed.get("body") or
+                                    parsed.get("message") or "")
+                            sender = (parsed.get("sender") or
+                                      parsed.get("from") or
+                                      parsed.get("pushName") or "Bilinmiyor")
+                            chat = str(parsed.get("chat") or
+                                      parsed.get("jid") or "")
+                        else:
+                            continue
+                    except:
                         continue
+                else:
+                    chat   = str(d.get(self._kolon_map.get("chat",""),"") or "").lower()
+                    sender = str(d.get(self._kolon_map.get("sender",""),"") or "Bilinmiyor")
+                    text   = str(d.get(self._kolon_map.get("text",""),"") or "")
+                    if not self._kolon_map.get("text"):
+                        for k,v in d.items():
+                            if isinstance(v,str) and len(v)>2 and k not in (
+                                    "rowid","id","key_id","_id"):
+                                text=v; break
 
-                # Sistem mesajlarını atla
-                if not text or text in ("null","None",""):
+                if hedef_grup and chat and hedef_grup not in chat:
                     continue
+                if not text or text in ("null","None",""): continue
 
-                # Kendi telefon numarasını gönderen göster
                 sender_clean = sender.split("@")[0] if "@" in sender else sender
-
                 self.on_log(f"📩 [{sender_clean}]: {text[:60]}")
                 self._biriktiric.ekle(sender_clean, text)
 
         except _sqlite3.OperationalError as e:
             if "locked" in str(e).lower() or "readonly" in str(e).lower():
-                pass  # WA DB kilitli olabilir, geç
+                pass
             else:
                 raise
 
