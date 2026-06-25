@@ -343,54 +343,31 @@ class WABot:
         except Exception as e:
             self.on_log(f"⚠ message okuma: {e}")
 
-    # ── Bildirim yöntemi (DB bulunamazsa) ───────────────────────────────────
+    # ── DB bulunamazsa bekleme modu ─────────────────────────────────────────
     def _dinle_bildirim(self):
         """
-        Windows Toast bildirimlerini izle.
-        WA Desktop bildirim gelince aktive olur.
-        Fare/klavyeye dokunmaz.
+        WA Desktop DB bulunamazsa kullanıcıyı bilgilendir ve bekleme moduna gir.
+        Hiçbir harici process açmaz.
         """
-        self.on_log("📳 WhatsApp Desktop bildirimleri izleniyor…")
-        self.on_log("💡 İpucu: WhatsApp Desktop açık ve bildirimlere izin verilmiş olmalı.")
+        self.on_log("⚠ WhatsApp Desktop veritabanı bulunamadı.")
+        self.on_log("📋 Lütfen şunları kontrol edin:")
+        self.on_log("   1. WhatsApp Desktop (Microsoft Store) kurulu mu?")
+        self.on_log("   2. WhatsApp Desktop açık ve giriş yapılmış mı?")
+        self.on_log("   3. En az 1 mesaj alınmış mı? (DB oluşması için)")
+        self.on_log("🔄 60 sn sonra tekrar denenecek…")
+        self.on_status("WARN", "● DB Bekleniyor", RENK_SARI)
 
-        son_bildirim = ""
         while self.running:
-            try:
-                if WIN32_OK:
-                    bildirim = self._bildirim_oku()
-                    if bildirim and bildirim != son_bildirim:
-                        son_bildirim = bildirim
-                        gonderen, metin = self._bildirim_parse(bildirim)
-                        if metin:
-                            self.on_message(gonderen, metin, [])
-            except Exception as e:
-                pass
-            time.sleep(5)
-
-    def _bildirim_oku(self):
-        """Windows bildirim alanındaki WA mesajını oku."""
-        # ActionCenter / Toast bildirimleri için
-        try:
-            import ctypes
-            # Windows 10/11 bildirim merkezi API
-            # Alternatif: powershell ile son bildirimi al
-            import subprocess
-            result = subprocess.run(
-                ["powershell", "-Command",
-                 "Get-EventLog -LogName Application -Source 'WhatsApp' "
-                 "-Newest 1 -ErrorAction SilentlyContinue | "
-                 "Select-Object -ExpandProperty Message"],
-                capture_output=True, text=True, timeout=5)
-            return result.stdout.strip()
-        except:
-            return ""
-
-    def _bildirim_parse(self, text):
-        """Bildirim metninden gönderen ve mesajı ayır."""
-        if ":" in text:
-            parts = text.split(":", 1)
-            return parts[0].strip(), parts[1].strip()
-        return "Bilinmiyor", text
+            time.sleep(60)
+            db_yolu = self._wa_db_bul()
+            if db_yolu:
+                self._wa_db = db_yolu
+                self.on_log("✅ WhatsApp Desktop DB bulundu! Mesajlar izleniyor…")
+                self._son_id = self._son_mesaj_id()
+                self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
+                self._dinle_db()
+                return
+            self.on_log("⏳ DB henüz yok, tekrar bekleniyor…")
 
     def stop(self):
         self.running = False
