@@ -407,8 +407,22 @@ class WABot:
                 if not text:
                     continue
 
+                # Boş göndereni atla (sistem mesajları)
+                if not sender or sender == "Bilinmiyor":
+                    continue
+                # Anahtar kelime kontrolü — eşleşme yoksa biriktiriciye ekleme
+                cfg_check = load_config()
+                metin_l = text.lower()
+                eslesen_kw = False
+                for kural in cfg_check.get("kurallar",[]):
+                    for kw in kural.get("keywords",[]):
+                        if kw.lower() in metin_l:
+                            eslesen_kw = True; break
+                    if eslesen_kw: break
+                if not eslesen_kw:
+                    continue  # Anahtar kelime yok, atla
                 self.on_log(f"📩 [{sender}]: {text[:60]}")
-                self._biriktiric.ekle(sender or "Bilinmiyor", text)
+                self._biriktiric.ekle(sender, text)
 
         except Exception as e:
             raise e
