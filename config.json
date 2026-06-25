@@ -4,25 +4,35 @@
   "outlook_account": "",
   "kurallar": [
     {
+      "id": "pregate",
+      "ad": "PREGATE",
+      "keywords": ["pregate"],
+      "mail_list": [
+        "pregatearackontrol@polisan.com.tr",
+        "sseymen@poliport.com",
+        "gtanriverdi@poliport.com"
+      ]
+    },
+    {
       "id": "poliport",
       "ad": "POLİPORT",
       "keywords": ["poliport", "port"],
       "mail_list": [
         "pregatearackontrol@polisan.com.tr",
-        "gtanriverdi@poliport.com",
         "sseymen@poliport.com",
+        "gtanriverdi@poliport.com",
         "terminalsevkiyat@polisan.com.tr"
       ]
     },
     {
       "id": "kimya",
-      "ad": "POLİSAN KİMYA",
-      "keywords": ["polisan", "kimya", "yapıkim", "yapikim"],
+      "ad": "KİMYA",
+      "keywords": ["kimya", "polisan", "yapıkim", "yapikim"],
       "mail_list": [
         "pregatearackontrol@polisan.com.tr",
-        "gtanriverdi@poliport.com",
         "sseymen@poliport.com",
-        "k.sevkiyat@polisankimya.com"
+        "gtanriverdi@poliport.com",
+        "k.sevkiyat@polisan.com"
       ]
     }
   ]

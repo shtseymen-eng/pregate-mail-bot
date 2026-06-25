@@ -442,7 +442,7 @@ class WABot:
                 return
 
             now_ts = time.time()
-            self._seen = {k:v for k,v in self._seen.items() if now_ts-v < 7200}
+            self._seen = {k:v for k,v in self._seen.items() if now_ts-v < 600}
 
             def _norm(s):
                 return s.lower().replace("ı","i").replace("ğ","g")\
@@ -465,20 +465,56 @@ class WABot:
 
                 # Resimleri indir
                 img_paths = []
-                for url in img_urls[:3]:
+                if img_urls:
                     try:
-                        if url.startswith("blob:"):
-                            import base64 as _b64
-                            data = self._driver.execute_async_script(
-                                self.JS_BLOB_TO_B64, url)
-                            if data and "," in data:
-                                raw = _b64.b64decode(data.split(",")[1])
-                                ext = ".png" if "png" in data[:30] else ".jpg"
-                                import tempfile as _tmp
-                                p = os.path.join(_tmp.gettempdir(),
-                                    f"wa_{int(time.time()*1000)}{ext}")
-                                with open(p,"wb") as f: f.write(raw)
-                                img_paths.append(p)
+                        import base64 as _b64, tempfile as _tmp
+                        # Tüm blob URL'leri tek JS çağrısıyla indir
+                        JS_MULTI = """
+                        const urls = arguments[0];
+                        const results = [];
+                        for (const url of urls.slice(0,3)) {
+                            try {
+                                const r = await fetch(url);
+                                const b = await r.blob();
+                                const buf = await b.arrayBuffer();
+                                const arr = Array.from(new Uint8Array(buf));
+                                results.push({data: btoa(String.fromCharCode(...arr)),
+                                              type: b.type});
+                            } catch(e) { results.push(null); }
+                        }
+                        return results;
+                        """
+                        self._driver.set_script_timeout(15)
+                        results = self._driver.execute_script(
+                            "return (async () => {" + JS_MULTI + "})()",
+                        ) or []
+                        # Alternatif: async_script ile
+                        if not results:
+                            for url in img_urls[:3]:
+                                if url.startswith("blob:"):
+                                    try:
+                                        data = self._driver.execute_async_script(
+                                            self.JS_BLOB_TO_B64, url)
+                                        if data and "," in data:
+                                            raw = _b64.b64decode(data.split(",")[1])
+                                            ext = ".png" if "png" in data[:30] else ".jpg"
+                                            p = os.path.join(_tmp.gettempdir(),
+                                                f"wa_{int(time.time()*1000)}{ext}")
+                                            with open(p,"wb") as f: f.write(raw)
+                                            img_paths.append(p)
+                                    except: pass
+                        else:
+                            for res in results:
+                                if res and res.get("data"):
+                                    try:
+                                        raw = _b64.b64decode(res["data"])
+                                        mime = res.get("type","image/jpeg")
+                                        ext = ".png" if "png" in mime else ".jpg"
+                                        p = os.path.join(_tmp.gettempdir(),
+                                            f"wa_{int(time.time()*1000)}{ext}")
+                                        with open(p,"wb") as f: f.write(raw)
+                                        img_paths.append(p)
+                                    except: pass
                     except: pass
 
                 # Metin yoksa resim var mı bak
