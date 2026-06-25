@@ -1074,11 +1074,11 @@ class App(ctk.CTk):
 
     def _on_message(self, gonderen, text, img_paths):
         cfg = load_config()
-        metin_lower = text.lower()
+        metin_lower = (text or "").lower()
         eslesen = []
         for kural in cfg.get("kurallar", []):
             for kw in kural.get("keywords", []):
-                if kw in metin_lower:
+                if kw.lower() in metin_lower:
                     eslesen.append(kural); break
         if not eslesen:
             self._log(f"💬 Mesaj geldi, eşleşme yok: {text[:50]}"); return
