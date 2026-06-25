@@ -129,7 +129,7 @@ Saygılarımızla,
 Pregate Araç Kontrol Sistemi
 """
 
-def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi):
+def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi, img_paths=None):
     if not OUTLOOK_OK: return False, "pywin32 yüklü değil"
     sonuc = [False, ""]
     def _gonder():
@@ -144,6 +144,12 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi):
                 tarih=tarih, gonderen=gonderen,
                 grup=grup_adi, mesaj=mesaj)
             mail.To = "; ".join(mail_list)
+            # Resimleri ek olarak ekle
+            if img_paths:
+                for p in img_paths:
+                    if p and os.path.exists(p):
+                        try: mail.Attachments.Add(p)
+                        except: pass
             if from_account:
                 try:
                     for acc in ol.GetNamespace("MAPI").Accounts:
@@ -203,18 +209,14 @@ class MesajBiriktiric:
 # QR bir kez taranır, sonra profil kaydedilir
 # ══════════════════════════════════════════════════════════════════════════════
 class WABot:
-    # JavaScript: sayfadaki son gelen mesajları oku
+    # JavaScript: sayfadaki son gelen mesajları oku (metin + resim URL)
     JS_MESAJLARI_OKU = """
     const mesajlar = [];
-    // Tüm mesaj satırlarını al
-    const rows = document.querySelectorAll(
-        '[data-testid="msg-container"]' 
-    );
+    const rows = document.querySelectorAll('[data-testid="msg-container"]');
     rows.forEach(el => {
-        // Kendi mesajımızı atla (message-out class'ı var)
         if (el.closest('[class*="message-out"]')) return;
 
-        // Metin — tüm olası selector'ları dene
+        // Metin
         let text = '';
         const selectors = [
             '[data-testid="msg-text"]',
@@ -227,13 +229,12 @@ class WABot:
             if (el2 && el2.innerText) { text = el2.innerText.trim(); break; }
         }
 
-        // Gönderen — copyable-text data-pre-plain-text içinden
+        // Gönderen
         let sender = '';
         const copyable = el.querySelector('[data-pre-plain-text]');
         if (copyable) {
             const pre = copyable.getAttribute('data-pre-plain-text') || '';
-            // Format: "[HH:MM, DD.MM.YYYY] Ad Soyad: "
-            const m = pre.match(/\] (.+?):\s*$/);
+            const m = pre.match(/] (.+?):\s*$/);
             if (m) sender = m[1].trim();
         }
         if (!sender) {
@@ -241,20 +242,45 @@ class WABot:
             if (sEl) sender = sEl.innerText || '';
         }
 
-        // Benzersiz ID
+        // Resim URL'leri (blob: veya https:)
+        const imgUrls = [];
+        el.querySelectorAll('img').forEach(img => {
+            const src = img.src || '';
+            if (src.startsWith('blob:') || src.startsWith('https://')) {
+                imgUrls.push(src);
+            }
+        });
+
         const msgId = el.getAttribute('data-id') ||
                       el.getAttribute('data-key') ||
                       (sender + '::' + text.substring(0,30));
 
-        if (text && text.length > 0) {
+        if (text || imgUrls.length > 0) {
             mesajlar.push({
                 id: msgId,
                 text: text,
-                sender: sender || 'Bilinmiyor'
+                sender: sender || 'Bilinmiyor',
+                imgUrls: imgUrls
             });
         }
     });
-    return mesajlar.slice(-30);  // Son 30 mesaj
+    return mesajlar.slice(-30);
+    """
+
+    # JavaScript: blob URL'yi base64'e çevir
+    JS_BLOB_TO_B64 = """
+    const url = arguments[0];
+    return new Promise((resolve) => {
+        fetch(url)
+            .then(r => r.blob())
+            .then(b => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => resolve(null);
+                reader.readAsDataURL(b);
+            })
+            .catch(() => resolve(null));
+    });
     """
 
     def __init__(self, on_log, on_status, on_message):
@@ -445,8 +471,8 @@ class WABot:
                     if eslesen_kw: break
                 if not eslesen_kw:
                     continue  # Anahtar kelime yok, atla
-                self.on_log(f"📩 [{sender}]: {text[:60]}")
-                self._biriktiric.ekle(sender, text)
+                self.on_log(f"📩 [{sender}]: {text[:60]}" + (f"  📎{len(img_paths)}resim" if img_paths else ""))
+                self._biriktiric.ekle(sender, text, img_paths)
 
         except Exception as e:
             raise e
@@ -1021,7 +1047,7 @@ class App(ctk.CTk):
 
     def _rapor(self): RaporPencere(self)
 
-    def _on_mesaj_bitti(self,gonderen,birlesik_metin):
+    def _on_mesaj_bitti(self,gonderen,birlesik_metin,resimler=None):
         cfg=load_config()
         def norm(s):
             return s.lower().replace("ı","i").replace("ğ","g")\
@@ -1042,7 +1068,8 @@ class App(ctk.CTk):
             if not ml:
                 self._log(f"⚠ '{kural.get('ad')}' mail listesi boş!"); continue
             ok,info=send_mail(ml,kural["ad"],gonderen,birlesik_metin,
-                              from_acc,cfg.get("wa_group_name",""))
+                              from_acc,cfg.get("wa_group_name",""),
+                              resimler or [])
             if ok:
                 self.mail_say+=1
                 self.after(0,lambda: self.lbl_sayac.configure(text=str(self.mail_say)))
