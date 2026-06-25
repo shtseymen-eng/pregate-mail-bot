@@ -224,14 +224,18 @@ class WABot:
             on_gonder=self.on_message,
             bekleme=BEKLEME_SURE)
 
+        self.on_log("🔍 WhatsApp DB aranıyor…")
         db = self._wa_db_bul()
         if db:
             self._wa_db = db
-            self.on_log(f"✅ WhatsApp DB bulundu: {os.path.basename(os.path.dirname(db))}")
+            self.on_log(f"✅ DB bulundu: {db}")
+            self.on_log("🔬 DB şeması inceleniyor…")
             self._db_kesfet()
+            self.on_log("📌 Başlangıç ID alınıyor…")
             self._son_id = self._son_id_al()
-            self.on_log(f"📌 Başlangıç mesaj ID: {self._son_id}")
+            self.on_log(f"📌 Başlangıç ID: {self._son_id}")
             self.on_status("OK", "● Çalışıyor ✓", RENK_YESIL)
+            self.on_log("✅ Hazır! Yeni mesaj bekleniyor…")
             self._dinle()
         else:
             self.on_log("⚠ WhatsApp Desktop DB bulunamadı.")
@@ -389,10 +393,14 @@ class WABot:
         """10 sn'de bir DB kontrol et."""
         cfg = load_config()
         hedef = cfg.get("wa_group_name","").strip().lower()
-
+        self.on_log(f"👂 Dinleniyor: grup='{hedef}' | DB: {os.path.basename(self._wa_db)}")
+        dongu = 0
         while self.running:
             try:
                 self._kontrol(hedef)
+                dongu += 1
+                if dongu % 6 == 0:  # her 60 sn
+                    self.on_log(f"⏳ Aktif ({dongu*10}sn) | Son ID: {self._son_id}")
             except Exception as e:
                 self.on_log(f"⚠ Kontrol hatası: {e}")
             time.sleep(10)
