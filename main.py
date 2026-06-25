@@ -254,25 +254,65 @@ class WABot:
                     return
 
     def _wa_db_bul(self):
-        """WhatsApp Desktop DB'sini bul.
-        Yeni WA Desktop mesajları sessions/<hash>/ altında saklar.
-        """
+        """WhatsApp Desktop DB'sini bul — hızlı, os.walk yok."""
         appdata = os.environ.get("LOCALAPPDATA","")
-        for pkg in [self.WA_PKG, self.WA_PKG_OLD, "5319275A.WhatsAppDesktop*",
-                    "5319275A.WhatsApp*"]:
-            pkg_path_list = glob.glob(os.path.join(appdata,"Packages",pkg))
-            for pkg_path in pkg_path_list:
-                # Tüm alt klasörleri tara — sessions dahil
-                for root,dirs,files in os.walk(pkg_path):
-                    for db_name in self.WA_DB_NAMES:
-                        if db_name in files:
-                            return os.path.join(root, db_name)
-        # Standalone kurulum
+
+        for pkg in [self.WA_PKG, self.WA_PKG_OLD]:
+            pkg_path = os.path.join(appdata,"Packages",pkg)
+            if not os.path.exists(pkg_path):
+                continue
+
+            # 1. Doğrudan LocalState altı
+            ls = os.path.join(pkg_path,"LocalState")
+            if os.path.exists(ls):
+                for db in self.WA_DB_NAMES:
+                    p = os.path.join(ls,db)
+                    if os.path.exists(p): return p
+
+                # 2. LocalState/sessions/<hash>/ altı
+                sessions = os.path.join(ls,"sessions")
+                if os.path.exists(sessions):
+                    for h in os.listdir(sessions):
+                        hdir = os.path.join(sessions,h)
+                        if os.path.isdir(hdir):
+                            for db in self.WA_DB_NAMES:
+                                p = os.path.join(hdir,db)
+                                if os.path.exists(p): return p
+
+            # 3. LocalCache altı
+            lc = os.path.join(pkg_path,"LocalCache","Roaming","WhatsApp")
+            if os.path.exists(lc):
+                for db in self.WA_DB_NAMES:
+                    p = os.path.join(lc,db)
+                    if os.path.exists(p): return p
+
+        # 4. Wildcard ile paket adı farklıysa
+        for pat in [
+            os.path.join(appdata,"Packages","5319275A.WhatsAppDesktop*"),
+            os.path.join(appdata,"Packages","5319275A.WhatsApp*"),
+        ]:
+            for pkg_path in glob.glob(pat):
+                ls = os.path.join(pkg_path,"LocalState")
+                if not os.path.exists(ls): continue
+                for db in self.WA_DB_NAMES:
+                    p = os.path.join(ls,db)
+                    if os.path.exists(p): return p
+                sessions = os.path.join(ls,"sessions")
+                if os.path.exists(sessions):
+                    for h in os.listdir(sessions):
+                        hdir = os.path.join(sessions,h)
+                        if not os.path.isdir(hdir): continue
+                        for db in self.WA_DB_NAMES:
+                            p = os.path.join(hdir,db)
+                            if os.path.exists(p): return p
+
+        # 5. Standalone
         for p in [
             os.path.join(appdata,"WhatsApp","messages.db"),
             os.path.join(os.environ.get("APPDATA",""),"WhatsApp","messages.db"),
         ]:
             if os.path.exists(p): return p
+
         return None
 
     def _wa_tum_dosyalari_logla(self):
