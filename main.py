@@ -217,7 +217,7 @@ class MesajBiriktiric:
 # QR bir kez taranır, sonra profil kaydedilir
 # ══════════════════════════════════════════════════════════════════════════════
 class WABot:
-    # JavaScript: sayfadaki son gelen mesajları oku (metin + resim URL)
+    # JavaScript: sayfadaki son gelen mesajları oku (metin + resim URL + zaman)
     JS_MESAJLARI_OKU = """
     const mesajlar = [];
     const rows = document.querySelectorAll('[data-testid="msg-container"]');
@@ -250,7 +250,20 @@ class WABot:
             if (sEl) sender = sEl.innerText || '';
         }
 
-        // Resim URL'leri (blob: veya https:)
+        // Mesaj zamanı (data-pre-plain-text içinde: "[SS:DD, GG.AA.YYYY]")
+        let msgTime = null;
+        const copyable2 = el.querySelector('[data-pre-plain-text]');
+        if (copyable2) {
+            const pre = copyable2.getAttribute('data-pre-plain-text') || '';
+            const tm = pre.match(/\[(\d{1,2}:\d{2}),\s*(\d{1,2}\.\d{1,2}\.\d{4})\]/);
+            if (tm) {
+                const [h, min] = tm[1].split(':').map(Number);
+                const [d, mo, y] = tm[2].split('.').map(Number);
+                msgTime = new Date(y, mo-1, d, h, min).getTime() / 1000;
+            }
+        }
+
+        // Resim URL'leri
         const imgUrls = [];
         el.querySelectorAll('img').forEach(img => {
             const src = img.src || '';
@@ -268,7 +281,8 @@ class WABot:
                 id: msgId,
                 text: text,
                 sender: sender || 'Bilinmiyor',
-                imgUrls: imgUrls
+                imgUrls: imgUrls,
+                msgTime: msgTime
             });
         }
     });
@@ -295,10 +309,11 @@ class WABot:
         self.on_log     = on_log
         self.on_status  = on_status
         self.on_message = on_message
-        self.running    = False
-        self._driver    = None
-        self._seen      = {}   # msg_id -> timestamp
+        self.running     = False
+        self._driver     = None
+        self._seen       = {}   # msg_id -> timestamp
         self._biriktiric = None
+        self._baslangic  = None  # bot başlama zamanı
 
     def start(self):
         self.running = True
@@ -310,6 +325,7 @@ class WABot:
             bekleme=BEKLEME_SURE)
 
         self.on_status("START", "● Başlatılıyor…", RENK_SARI)
+        self._baslangic = time.time()  # Bu andan önceki mesajları işleme
         self.on_log("🌐 Chrome açılıyor (WhatsApp Web)…")
 
         try:
@@ -466,10 +482,16 @@ class WABot:
                 text     = m.get("text","").strip()
                 sender   = m.get("sender","Bilinmiyor").strip()
                 img_urls = m.get("imgUrls",[])
+                msg_time = m.get("msgTime")  # mesajın gerçek zamanı
 
                 if not msg_id or msg_id in self._seen:
                     continue
                 self._seen[msg_id] = now_ts
+
+                # Bot başlamadan önceki mesajları atla
+                if msg_time and self._baslangic:
+                    if msg_time < self._baslangic - 30:  # 30sn tolerans
+                        continue
 
                 # Boş göndereni atla
                 if not sender or sender == "Bilinmiyor":
