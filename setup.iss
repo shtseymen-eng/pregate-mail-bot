@@ -1,6 +1,6 @@
 [Setup]
 AppName=Pregate Kayıt Red Mail Botu
-AppVersion=1.0
+AppVersion=1.1
 AppPublisher=Poliport
 DefaultDirName={autopf}\PregateMail
 DefaultGroupName=Pregate Mail Botu
@@ -20,10 +20,12 @@ Name: "startupicon"; Description: "Windows başlangıcında otomatik çalıştı
 
 [Files]
 Source: "dist\PregateMail\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; config.json — sadece ilk kurulumda kopyala, güncellemede üzerine yazma
+Source: "dist\PregateMail\config.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
-Name: "{group}\Pregate Mail Botu";  Filename: "{app}\PregateMail.exe"
-Name: "{group}\Kaldır";             Filename: "{uninstallexe}"
+Name: "{group}\Pregate Mail Botu"; Filename: "{app}\PregateMail.exe"
+Name: "{group}\Kaldır"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Pregate Mail Botu"; Filename: "{app}\PregateMail.exe"; Tasks: desktopicon
 
 [Registry]

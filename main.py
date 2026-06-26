@@ -320,10 +320,22 @@ class WABot:
             opts.add_argument("--disable-dev-shm-usage")
             opts.add_argument("--disable-notifications")
             opts.add_argument("--disable-popup-blocking")
-            # Arka planda çalış — görünür pencere bırak (QR için)
-            # opts.add_argument("--headless")
+            opts.add_argument("--no-first-run")
+            opts.add_argument("--no-default-browser-check")
+            opts.add_argument("--disable-background-timer-throttling")
+            opts.add_argument("--disable-backgrounding-occluded-windows")
+            opts.add_argument("--disable-renderer-backgrounding")
+            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            opts.add_experimental_option("useAutomationExtension", False)
 
-            self._driver = webdriver.Chrome(options=opts)
+            # ChromeDriver otomatik versiyon eşleşmesi
+            try:
+                from selenium.webdriver.chrome.service import Service
+                from webdriver_manager.chrome import ChromeDriverManager
+                service = Service(ChromeDriverManager().install())
+                self._driver = webdriver.Chrome(service=service, options=opts)
+            except Exception:
+                self._driver = webdriver.Chrome(options=opts)
             self._driver.get("https://web.whatsapp.com")
 
             self.on_log("📷 İlk kullanımda QR taratın — sonra otomatik giriş yapar.")
