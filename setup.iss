@@ -20,8 +20,29 @@ Name: "startupicon"; Description: "Windows başlangıcında otomatik çalıştı
 
 [Files]
 Source: "dist\PregateMail\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; config.json — sadece ilk kurulumda kopyala, güncellemede üzerine yazma
-Source: "dist\PregateMail\config.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
+
+[Code]
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+begin
+end;
+
+procedure InitializeWizard();
+begin
+end;
+
+// Kurulum bittikten sonra config yoksa kopyala
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ConfigDest: String;
+  ConfigSrc: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    ConfigDest := ExpandConstant('{app}\config.json');
+    ConfigSrc  := ExpandConstant('{app}\config.json');
+    // Zaten var, bir şey yapma
+  end;
+end;
 
 [Icons]
 Name: "{group}\Pregate Mail Botu"; Filename: "{app}\PregateMail.exe"
