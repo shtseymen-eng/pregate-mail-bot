@@ -174,14 +174,17 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi, img_
 # ══════════════════════════════════════════════════════════════════════════════
 class MesajBiriktiric:
     def __init__(self, on_gonder, bekleme=BEKLEME_SURE):
-        self.on_gonder = on_gonder
-        self.bekleme   = bekleme
-        self._kuyruk   = {}
-        self._lock     = threading.Lock()
+        self.on_gonder  = on_gonder
+        self.bekleme    = bekleme
+        self._kuyruk    = {}
+        self._gonderildi = set()  # mail atılan kişiler
+        self._lock      = threading.Lock()
 
     def ekle(self, gonderen, metin, img_paths=None):
         """Yeni mesaj geldi — biriktiriciye ekle, timer sıfırla."""
         with self._lock:
+            # Daha önce mail atılmış ama yeni mesaj geldi — blokeden çıkar
+            self._gonderildi.discard(gonderen)
             if gonderen not in self._kuyruk:
                 self._kuyruk[gonderen] = {
                     "metinler": [], "resimler": [], "timer": None}
@@ -203,6 +206,8 @@ class MesajBiriktiric:
             veri     = self._kuyruk.pop(gonderen)
             metinler = veri["metinler"]
             resimler = veri["resimler"]
+            # Mail gönderildikten sonra bu kişiyi bloke et
+            self._gonderildi.add(gonderen)
         if metinler:
             self.on_gonder(gonderen, "\n".join(metinler), resimler)
 
@@ -495,6 +500,10 @@ class WABot:
 
                 # Boş göndereni atla
                 if not sender or sender == "Bilinmiyor":
+                    continue
+
+                # Bu kişiye zaten mail atıldı ve yeni mesaj yok — atla
+                if sender in self._biriktiric._gonderildi:
                     continue
 
                 # Resimleri indir
