@@ -59,6 +59,24 @@ os.makedirs(PROFILE_DIR, exist_ok=True)
 
 BEKLEME_SURE = 120
 
+# ── Türkçe-güvenli normalize ──────────────────────────────────────────────
+# Python'un .lower() metodu Türkçe büyük 'İ' harfini 'i' yerine
+# 'i' + birleşik nokta işaretine (U+0307) çevirir, bu da anahtar kelime
+# eşleşmesini bozar (örn. "KİMYA" -> "ki̇mya" olur, "kimya" ile eşleşmez).
+# Bu yüzden küçültmeden ÖNCE Türkçe büyük harfleri elle çeviriyoruz.
+def turkce_norm(s):
+    if not s:
+        return ""
+    s = (s.replace("İ", "i").replace("I", "ı")
+           .replace("Ğ", "g").replace("Ü", "u")
+           .replace("Ş", "s").replace("Ö", "o")
+           .replace("Ç", "c"))
+    s = s.lower()
+    s = (s.replace("ı", "i").replace("ğ", "g").replace("ü", "u")
+           .replace("ş", "s").replace("ö", "o").replace("ç", "c")
+           .replace("\u0307", ""))  # kalan olası birleşik nokta işaretlerini temizle
+    return s
+
 # ── Config ──────────────────────────────────────────────────────────────────
 def load_config():
     try:
@@ -226,7 +244,9 @@ class WABot:
     JS_MESAJLARI_OKU = """
     const mesajlar = [];
     const rows = document.querySelectorAll('[data-testid="msg-container"]');
-    rows.forEach(el => {
+    let sonGonderen = ''; // WhatsApp art arda gelen mesajlarda gönderen adını
+                          // sadece ilk mesajda gösterir; sonrakiler için bunu kullan
+    rows.forEach((el, idx) => {
         if (el.closest('[class*="message-out"]')) return;
 
         // Metin
@@ -254,6 +274,13 @@ class WABot:
             const sEl = el.querySelector('[data-testid="author"]');
             if (sEl) sender = sEl.innerText || '';
         }
+        if (sender) {
+            sonGonderen = sender; // bilinen gönderen güncellendi
+        } else if (sonGonderen) {
+            // Art arda gelen mesajda WhatsApp gönderen göstermiyor —
+            // bir önceki mesajdaki gönderenden devam et.
+            sender = sonGonderen;
+        }
 
         // Mesaj zamanı (data-pre-plain-text içinde: "[SS:DD, GG.AA.YYYY]")
         let msgTime = null;
@@ -279,7 +306,7 @@ class WABot:
 
         const msgId = el.getAttribute('data-id') ||
                       el.getAttribute('data-key') ||
-                      (sender + '::' + text.substring(0,30));
+                      (sender + '::' + (msgTime || idx) + '::' + text);
 
         if (text || imgUrls.length > 0) {
             mesajlar.push({
@@ -382,9 +409,9 @@ class WABot:
             self.on_status("ERR", "● Zaman Aşımı", RENK_KIRMIZI)
             self.running = False
         except WebDriverException as e:
-            self.on_log(f"❌ Chrome hatası: {str(e)[:100]}")
-            self.on_status("ERR", "● Chrome Hatası", RENK_KIRMIZI)
-            self.running = False
+            self.on_log(f"❌ Chrome hatası: {str(e)[:100]} — yeniden deneniyor…")
+            self.on_status("ERR", "● Yeniden bağlanıyor…", RENK_SARI)
+            self._otomatik_yeniden_baslat()
 
     def _gruba_git(self):
         cfg  = load_config()
@@ -457,11 +484,17 @@ class WABot:
                 dongu += 1
                 if dongu % 6 == 0:
                     self.on_log(f"⏳ Aktif — {dongu*10}sn")
+                # Her ~5 dakikada bir sayfa hâlâ yanıt veriyor mu kontrol et
+                if dongu % 30 == 0:
+                    self._saglik_kontrol()
             except WebDriverException as e:
-                if "chrome not reachable" in str(e).lower():
-                    self.on_log("❌ Chrome kapandı!")
-                    self.on_status("ERR", "● Bağlantı Kesildi", RENK_KIRMIZI)
-                    break
+                if "chrome not reachable" in str(e).lower() or \
+                   "disconnected" in str(e).lower() or \
+                   "session deleted" in str(e).lower():
+                    self.on_log("❌ Chrome ile bağlantı koptu — otomatik yeniden başlatılıyor…")
+                    self.on_status("ERR", "● Yeniden bağlanıyor…", RENK_SARI)
+                    self._otomatik_yeniden_baslat()
+                    return
                 self.on_log(f"⚠ {str(e)[:60]}")
             except Exception as e:
                 self.on_log(f"⚠ Hata: {str(e)[:60]}")
@@ -477,10 +510,7 @@ class WABot:
             now_ts = time.time()
             self._seen = {k:v for k,v in self._seen.items() if now_ts-v < 600}
 
-            def _norm(s):
-                return s.lower().replace("ı","i").replace("ğ","g")\
-                    .replace("ü","u").replace("ş","s").replace("ö","o")\
-                    .replace("ç","c")
+            _norm = turkce_norm
 
             for m in mesajlar:
                 msg_id   = m.get("id","")
@@ -502,63 +532,58 @@ class WABot:
                 if not sender or sender == "Bilinmiyor":
                     continue
 
-                # Bu kişiye zaten mail atıldı ve yeni mesaj yok — atla
-                if sender in self._biriktiric._gonderildi:
-                    continue
+                # NOT: Daha önce burada "sender zaten gönderildi setindeyse atla"
+                # kontrolü vardı. Bu kontrol mesajı _seen'e işaretleyip
+                # biriktiriciye hiç eklemiyordu, yani mesaj kalıcı olarak
+                # kayboluyordu. MesajBiriktiric.ekle() zaten yeni mesaj
+                # geldiğinde gönderildi bloğunu otomatik kaldırıyor, bu yüzden
+                # bu erken-çıkışa hiç gerek yok — kaldırıldı.
 
                 # Resimleri indir
                 img_paths = []
                 if img_urls:
                     try:
                         import base64 as _b64, tempfile as _tmp
-                        # Tüm blob URL'leri tek JS çağrısıyla indir
-                        JS_MULTI = """
+                        # NOT: execute_script (senkron) bir Promise döndüğünde
+                        # onu BEKLEMEDEN hemen geri döner — bu yüzden eski kod
+                        # neredeyse her zaman boş sonuç alıyordu ve resimler
+                        # sessizce ekrana eklenmeden geçiliyordu. Doğrusu
+                        # execute_async_script kullanmaktır (callback'i bekler).
+                        JS_MULTI_ASYNC = """
                         const urls = arguments[0];
-                        const results = [];
-                        for (const url of urls.slice(0,3)) {
-                            try {
-                                const r = await fetch(url);
-                                const b = await r.blob();
-                                const buf = await b.arrayBuffer();
-                                const arr = Array.from(new Uint8Array(buf));
-                                results.push({data: btoa(String.fromCharCode(...arr)),
-                                              type: b.type});
-                            } catch(e) { results.push(null); }
-                        }
-                        return results;
+                        const callback = arguments[arguments.length - 1];
+                        (async () => {
+                            const results = [];
+                            for (const url of urls.slice(0,3)) {
+                                try {
+                                    const r = await fetch(url);
+                                    const b = await r.blob();
+                                    const buf = await b.arrayBuffer();
+                                    const arr = Array.from(new Uint8Array(buf));
+                                    let bin = '';
+                                    for (const byte of arr) bin += String.fromCharCode(byte);
+                                    results.push({data: btoa(bin), type: b.type});
+                                } catch (e) { results.push(null); }
+                            }
+                            callback(results);
+                        })();
                         """
-                        self._driver.set_script_timeout(15)
-                        results = self._driver.execute_script(
-                            "return (async () => {" + JS_MULTI + "})()",
-                        ) or []
-                        # Alternatif: async_script ile
-                        if not results:
-                            for url in img_urls[:3]:
-                                if url.startswith("blob:"):
-                                    try:
-                                        data = self._driver.execute_async_script(
-                                            self.JS_BLOB_TO_B64, url)
-                                        if data and "," in data:
-                                            raw = _b64.b64decode(data.split(",")[1])
-                                            ext = ".png" if "png" in data[:30] else ".jpg"
-                                            p = os.path.join(_tmp.gettempdir(),
-                                                f"wa_{int(time.time()*1000)}{ext}")
-                                            with open(p,"wb") as f: f.write(raw)
-                                            img_paths.append(p)
-                                    except: pass
-                        else:
-                            for res in results:
-                                if res and res.get("data"):
-                                    try:
-                                        raw = _b64.b64decode(res["data"])
-                                        mime = res.get("type","image/jpeg")
-                                        ext = ".png" if "png" in mime else ".jpg"
-                                        p = os.path.join(_tmp.gettempdir(),
-                                            f"wa_{int(time.time()*1000)}{ext}")
-                                        with open(p,"wb") as f: f.write(raw)
-                                        img_paths.append(p)
-                                    except: pass
-                    except: pass
+                        self._driver.set_script_timeout(20)
+                        results = self._driver.execute_async_script(
+                            JS_MULTI_ASYNC, img_urls) or []
+                        for res in results:
+                            if res and res.get("data"):
+                                try:
+                                    raw = _b64.b64decode(res["data"])
+                                    mime = res.get("type","image/jpeg")
+                                    ext = ".png" if "png" in mime else ".jpg"
+                                    p = os.path.join(_tmp.gettempdir(),
+                                        f"wa_{int(time.time()*1000)}{ext}")
+                                    with open(p,"wb") as f: f.write(raw)
+                                    img_paths.append(p)
+                                except: pass
+                    except Exception as e:
+                        self.on_log(f"⚠ Resim indirme hatası: {str(e)[:60]}")
 
                 # Metin yoksa resim var mı bak
                 if not text and img_paths:
@@ -586,6 +611,66 @@ class WABot:
 
         except Exception as e:
             raise e
+
+    def _saglik_kontrol(self):
+        """Sayfa hâlâ yanıt veriyor mu ve sohbet listesi görünür mü kontrol et.
+        Donmuşsa veya oturum düşmüşse sayfayı yenile, olmazsa botu yeniden başlat."""
+        try:
+            ok = self._driver.execute_script(
+                "return document.querySelector('[data-testid=\"chat-list\"],"
+                "[aria-label*=\"Sohbet\"], [aria-label*=\"Chat\"]') !== null"
+            )
+            if not ok:
+                self.on_log("⚠ Sohbet listesi görünmüyor, sayfa yenileniyor…")
+                self._driver.refresh()
+                time.sleep(8)
+                self._gruba_git_sessiz()
+        except Exception:
+            self.on_log("❌ Sağlık kontrolü başarısız — bot otomatik yeniden başlatılıyor…")
+            self._otomatik_yeniden_baslat()
+
+    def _gruba_git_sessiz(self):
+        """Sayfa yenilendikten sonra gruba tekrar gir (log kirletmeden)."""
+        try:
+            cfg = load_config()
+            grup = cfg.get("wa_group_name","").strip()
+            if not grup: return
+            for sel in ['[data-testid="chat-list-search"]',
+                        '[aria-label="Sohbet veya kişi ara"]',
+                        '[aria-label="Search or start new chat"]',
+                        'div[contenteditable="true"]']:
+                try:
+                    sb = WebDriverWait(self._driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                    sb.click(); time.sleep(0.5)
+                    sb.send_keys(grup); time.sleep(2)
+                    break
+                except: continue
+            for sel in [f'[title="{grup}"]',
+                        '[data-testid="cell-frame-container"]',
+                        'div[role="listitem"]']:
+                try:
+                    el = WebDriverWait(self._driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                    el.click(); break
+                except: continue
+            time.sleep(1)
+        except: pass
+
+    def _otomatik_yeniden_baslat(self):
+        """Chrome çöktüğünde veya bağlantı koptuğunda kullanıcı müdahalesi
+        olmadan botu kendi kendine yeniden başlatır."""
+        if not self.running:
+            return
+        try:
+            if self._driver: self._driver.quit()
+        except: pass
+        self._driver = None
+        time.sleep(5)
+        if not self.running:
+            return
+        self.on_log("🔄 Bot otomatik olarak yeniden başlatılıyor…")
+        self.start()
 
     def stop(self):
         self.running = False
@@ -1159,10 +1244,7 @@ class App(ctk.CTk):
 
     def _on_mesaj_bitti(self,gonderen,birlesik_metin,resimler=None):
         cfg=load_config()
-        def norm(s):
-            return s.lower().replace("ı","i").replace("ğ","g")\
-                .replace("ü","u").replace("ş","s").replace("ö","o")\
-                .replace("ç","c")
+        norm = turkce_norm
         metin_lower = norm(birlesik_metin)
         eslesen=[]
         for kural in cfg.get("kurallar",[]):
@@ -1183,7 +1265,7 @@ class App(ctk.CTk):
             if ok:
                 self.mail_say+=1
                 self.after(0,lambda: self.lbl_sayac.configure(text=str(self.mail_say)))
-                db_ekle(gonderen,kural["ad"],birlesik_metin,False)
+                db_ekle(gonderen,kural["ad"],birlesik_metin,bool(resimler))
                 self._log(f"✉ [{kural['ad']}] {gonderen} → "
                           f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}")
             else:
