@@ -83,7 +83,7 @@ def load_config():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
-        return {"wa_group_name":"Pregate Kayıt Red","outlook_account":"","kurallar":[]}
+        return {"wa_group_name":"Pregate Kayıt Red","outlook_account":"","kurallar":[],"bekleme_dk":1}
 
 def save_config(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -95,6 +95,13 @@ def db_init():
     con.execute("""CREATE TABLE IF NOT EXISTS kayitlar (
         id TEXT PRIMARY KEY, tarih TEXT, gonderen TEXT,
         kural_ad TEXT, mesaj TEXT, resim_var INTEGER DEFAULT 0)""")
+    # Gönderilen mesaj ID'lerini kalıcı olarak saklar — bot yeniden başlasa da
+    # aynı mesaj tekrar mail olarak gönderilmez.
+    con.execute("""CREATE TABLE IF NOT EXISTS seen_mesajlar (
+        msg_id TEXT PRIMARY KEY,
+        tarih  TEXT DEFAULT (datetime('now')))""")
+    # 24 saatten eski kayıtları temizle
+    con.execute("DELETE FROM seen_mesajlar WHERE tarih < datetime('now', '-1 day')")
     con.commit(); con.close()
 
 def db_ekle(gonderen, kural_ad, mesaj, resim_var):
@@ -103,6 +110,25 @@ def db_ekle(gonderen, kural_ad, mesaj, resim_var):
         (str(uuid.uuid4()), datetime.now().isoformat(),
          gonderen, kural_ad, mesaj, 1 if resim_var else 0))
     con.commit(); con.close()
+
+def db_seen_ekle(msg_id):
+    """Mesaj ID'sini kalıcı olarak işaretle — tekrar göndermeyi önler."""
+    try:
+        con = _sqlite3.connect(DB_FILE)
+        con.execute("INSERT OR IGNORE INTO seen_mesajlar (msg_id) VALUES (?)", (msg_id,))
+        con.commit(); con.close()
+    except: pass
+
+def db_seen_yukle():
+    """Son 24 saatteki işaretlenmiş mesaj ID'lerini yükle."""
+    try:
+        con = _sqlite3.connect(DB_FILE)
+        rows = con.execute(
+            "SELECT msg_id FROM seen_mesajlar WHERE tarih > datetime('now', '-1 day')"
+        ).fetchall()
+        con.close()
+        return {r[0] for r in rows}
+    except: return set()
 
 def db_rapor(yil, ay):
     con = _sqlite3.connect(DB_FILE)
@@ -343,7 +369,8 @@ class WABot:
         self.on_message = on_message
         self.running     = False
         self._driver     = None
-        self._seen       = {}   # msg_id -> timestamp
+        # DB'den son 24 saatin seen ID'lerini yükle — restart sonrası tekrar gönderme yok
+        self._seen       = {mid: time.time() for mid in db_seen_yukle()}
         self._biriktiric = None
         self._baslangic  = None  # bot başlama zamanı
 
@@ -482,8 +509,6 @@ class WABot:
             try:
                 self._mesajlari_oku()
                 dongu += 1
-                if dongu % 6 == 0:
-                    self.on_log(f"⏳ Aktif — {dongu*10}sn")
                 # Her ~5 dakikada bir sayfa hâlâ yanıt veriyor mu kontrol et
                 if dongu % 30 == 0:
                     self._saglik_kontrol()
@@ -508,7 +533,8 @@ class WABot:
                 return
 
             now_ts = time.time()
-            self._seen = {k:v for k,v in self._seen.items() if now_ts-v < 600}
+            # 24 saatlik TTL — 10 dk'da temizlenip eski mesajlar tekrar gönderilmesin
+            self._seen = {k:v for k,v in self._seen.items() if now_ts-v < 86400}
 
             _norm = turkce_norm
 
@@ -522,6 +548,7 @@ class WABot:
                 if not msg_id or msg_id in self._seen:
                     continue
                 self._seen[msg_id] = now_ts
+                db_seen_ekle(msg_id)  # Kalıcı olarak işaretle
 
                 # Bot başlamadan önceki mesajları atla
                 if msg_time and self._baslangic:
@@ -672,6 +699,48 @@ class WABot:
         self.on_log("🔄 Bot otomatik olarak yeniden başlatılıyor…")
         self.start()
 
+    def wa_cevap_gonder(self, metin):
+        """Mevcut WhatsApp grubuna otomatik cevap mesajı yaz ve gönder."""
+        if not self._driver:
+            return False
+        try:
+            from selenium.webdriver.common.keys import Keys
+            # Mesaj giriş kutusunu bul
+            kutu = None
+            for sel in [
+                'div[data-testid="conversation-compose-box-input"]',
+                'footer div[contenteditable="true"]',
+                'div[contenteditable="true"][aria-placeholder]',
+            ]:
+                try:
+                    kutu = WebDriverWait(self._driver, 6).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    break
+                except: continue
+
+            if not kutu:
+                self.on_log("⚠ WA cevap: mesaj kutusu bulunamadı.")
+                return False
+
+            kutu.click()
+            time.sleep(0.3)
+
+            # Satır satır yaz (SHIFT+ENTER ile alt satır)
+            satirlar = metin.split("\n")
+            for i, satir in enumerate(satirlar):
+                kutu.send_keys(satir)
+                if i < len(satirlar) - 1:
+                    kutu.send_keys(Keys.SHIFT + Keys.RETURN)
+
+            time.sleep(0.3)
+            kutu.send_keys(Keys.RETURN)
+            time.sleep(0.5)
+            self.on_log("📤 WA otomatik cevap gönderildi.")
+            return True
+        except Exception as e:
+            self.on_log(f"⚠ WA cevap gönderilemedi: {str(e)[:80]}")
+            return False
+
     def stop(self):
         self.running = False
         if self._biriktiric:
@@ -818,7 +887,7 @@ class AyarlarPencere(ctk.CTkToplevel):
         self.ent_sure = ctk.CTkEntry(row, width=60, fg_color=RENK_PANEL,
                                       border_color=RENK_VURGU,
                                       text_color=RENK_YAZI, font=("Segoe UI",11))
-        self.ent_sure.insert(0, str(load_config().get("bekleme_dk",2)))
+        self.ent_sure.insert(0, str(load_config().get("bekleme_dk",1)))
         self.ent_sure.pack(side="left", padx=10)
         ctk.CTkLabel(row, text="dakika", text_color=RENK_YAZI2,
                      font=("Segoe UI",10)).pack(side="left")
@@ -1242,23 +1311,65 @@ class App(ctk.CTk):
 
     def _rapor(self): RaporPencere(self)
 
+    # ── Format şablonu (WA'ya gönderilecek hata/hatırlatıcı mesaj) ─────────
+    FORMAT_HATIRLATICI = (
+        "⚠ Mesajınız işlenemedi — eksik bilgi.\n"
+        "Lütfen aşağıdaki formata uygun olarak tekrar gönderin:\n\n"
+        "📌 Örnek:\n"
+        "KİMYA\n"
+        "34 ABC 123 plakalı, TCSU100086-3 tank no'lu araç\n"
+        "Havuz tahliye vanası olmadığından kayıt yapılmamıştır.\n"
+        "[Fotoğraf eki]\n\n"
+        "Gerekli bilgiler:\n"
+        "• Departman kodu (KİMYA / POLİPORT / DOW vb.)\n"
+        "• Plaka / Tank no\n"
+        "• Kısa red sebebi\n"
+        "• En az 1 fotoğraf"
+    )
+
+    def _format_gecerli(self, metin, resimler):
+        """Basit format kontrolü: yeterli metin + en az 1 resim."""
+        if not resimler:
+            return False, "Fotoğraf eklenmemiş."
+        if len(metin.strip()) < 20:
+            return False, "Mesaj çok kısa — departman, plaka ve red sebebi eksik."
+        return True, ""
+
     def _on_mesaj_bitti(self,gonderen,birlesik_metin,resimler=None):
         cfg=load_config()
         norm = turkce_norm
         metin_lower = norm(birlesik_metin)
+
+        # ── Format kontrolü ────────────────────────────────────────────────
+        gecerli, format_hata = self._format_gecerli(birlesik_metin, resimler)
+        if not gecerli:
+            self._log(f"⚠ [{gonderen}] Format hatası: {format_hata}")
+            if self.wa_bot:
+                cevap = (
+                    f"⚠ [{gonderen}] mesajı işlenemedi: {format_hata}\n\n"
+                    + self.FORMAT_HATIRLATICI
+                )
+                threading.Thread(
+                    target=self.wa_bot.wa_cevap_gonder,
+                    args=(cevap,), daemon=True).start()
+            return
+
+        # ── Kural eşleşmesi ────────────────────────────────────────────────
         eslesen=[]
         for kural in cfg.get("kurallar",[]):
             for kw in kural.get("keywords",[]):
                 if norm(kw) in metin_lower:
                     eslesen.append(kural); break
         if not eslesen:
-            self._log(f"💬 [{gonderen}]: eşleşme yok")
+            self._log(f"💬 [{gonderen}]: eşleşen kural yok")
             return
+
         from_acc=cfg.get("outlook_account","") or None
         for kural in eslesen:
             ml=kural.get("mail_list",[])
             if not ml:
-                self._log(f"⚠ '{kural.get('ad')}' mail listesi boş!"); continue
+                self._log(f"⚠ '{kural.get('ad')}' kural mail listesi boş!"); continue
+
             ok,info=send_mail(ml,kural["ad"],gonderen,birlesik_metin,
                               from_acc,cfg.get("wa_group_name",""),
                               resimler or [])
@@ -1266,10 +1377,22 @@ class App(ctk.CTk):
                 self.mail_say+=1
                 self.after(0,lambda: self.lbl_sayac.configure(text=str(self.mail_say)))
                 db_ekle(gonderen,kural["ad"],birlesik_metin,bool(resimler))
-                self._log(f"✉ [{kural['ad']}] {gonderen} → "
-                          f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}")
+                alicilar = ", ".join(ml[:2]) + ("…" if len(ml)>2 else "")
+                self._log(
+                    f"✅ Mail atıldı — [{kural['ad']}] {gonderen} → {alicilar}"
+                )
             else:
-                self._log(f"❌ [{kural['ad']}] Mail hatası: {info}")
+                self._log(f"❌ Mail atılamadı — [{kural['ad']}] Sebep: {info}")
+                # WhatsApp'a otomatik hata cevabı
+                if self.wa_bot:
+                    wa_hata = (
+                        f"❌ Mail gönderilemedi ({kural['ad']}).\n"
+                        f"Sebep: {info}\n"
+                        "Lütfen mesajı yeniden düzenleyip gönderin."
+                    )
+                    threading.Thread(
+                        target=self.wa_bot.wa_cevap_gonder,
+                        args=(wa_hata,), daemon=True).start()
 
     def _log(self,msg):
         ts=datetime.now().strftime("%H:%M:%S")
