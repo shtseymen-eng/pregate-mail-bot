@@ -505,6 +505,7 @@ class WABot:
         self.on_log(f"🔍 '{grup}' grubu aranıyor…")
         try:
             # Arama kutusunu bul — birden fazla selector dene
+            sb = None
             for sel in [
                 '[data-testid="chat-list-search"]',
                 '[aria-label="Sohbet veya kişi ara"]',
@@ -516,6 +517,9 @@ class WABot:
                         EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
                     break
                 except: continue
+
+            if sb is None:
+                raise Exception("Arama kutusu bulunamadı — tüm selector'lar denendi")
 
             sb.click()
             time.sleep(0.5)
@@ -1573,12 +1577,21 @@ class App(ctk.CTk):
                     eslesen.append(kural); break
 
         if not eslesen:
+            # Ayarlarda özel mesaj varsa onu kullan, yoksa otomatik oluştur
             uygunsuz = cfg.get("uygunsuz_cevap", "").strip()
             if not uygunsuz:
+                # Config'deki kurallardan komut listesini dinamik oluştur
+                kural_listesi = []
+                for k in cfg.get("kurallar", []):
+                    kw_str = ", ".join(k.get("keywords", []))
+                    kural_listesi.append(f"• {k.get('ad','?')} → {kw_str}")
+                komutlar_str = "\n".join(kural_listesi) if kural_listesi else "• (Kural tanımlanmamış)"
                 uygunsuz = (
-                    "❌ Komut okunmadı — mesaj tanımlı kurallara uymadı.\n"
-                    "Lütfen araç plakası ve işlem bilgisini içeren mesajı\n"
-                    "doğru formatta tekrar gönderin."
+                    "❌ Uygunsuz mesaj — mail atılamaz.\n\n"
+                    "Mail atılabilmesi için mesajınızda\n"
+                    "aşağıdaki departman komutlarından\n"
+                    "birinin bulunması gerekiyor:\n\n"
+                    f"{komutlar_str}"
                 )
             self._log(f"💬 [{gonderen_mail}]: eşleşme yok — komut hatası WA yanıtı gönderildi")
             self._wa_yanit_gonder(uygunsuz)
@@ -1619,15 +1632,14 @@ class App(ctk.CTk):
         parcalar  = []
 
         if basarili_kurallar:
-            # Kural bazlı özel yanıt varsa onu kullan, yoksa otomatik oluştur
             for (kural_ad, wa_ozel) in basarili_kurallar:
                 if wa_ozel:
                     parcalar.append(wa_ozel)
                 else:
                     parcalar.append(
-                        f"✅ Mail gönderildi.\n"
-                        f"Grup  : {kural_ad}\n"
-                        f"Tarih : {tarih_str}"
+                        f"✅ Komutlar alındı.\n"
+                        f"{kural_ad} grubuna mail gönderildi.\n"
+                        f"Tarih: {tarih_str}"
                     )
 
         if basarisiz_kurallar:
