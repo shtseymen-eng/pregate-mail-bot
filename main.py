@@ -657,12 +657,14 @@ class WABot:
                 # Yöntem 1: Botun yazdığı yanıtlar her zaman bu öneklerle başlar.
                 # Gerçek kullanıcılar bu şekilde mesaj atmaz — en güvenilir filtre.
                 BOT_PREFIKSLERI = (
+                    "✅ Mail atıldı",
                     "✅ Komutlar alındı",
                     "❌ Uygunsuz mesaj",
                     "ℹ️ Bu mesaj bugün",
                     "❌ Komut okunmadı",
                     "📧 WA erişim",
                     "🧹 Grup sohbeti",
+                    "❌ Mail gönderilemedi",
                 )
                 if any(text.startswith(p) for p in BOT_PREFIKSLERI):
                     continue
@@ -1832,8 +1834,7 @@ class App(ctk.CTk):
                     parcalar.append(wa_ozel)
                 else:
                     parcalar.append(
-                        f"✅ Komutlar alındı.\n"
-                        f"{kural_ad} grubuna mail gönderildi.\n"
+                        f"✅ Mail atıldı.\n"
                         f"Tarih: {tarih_str}"
                     )
 
