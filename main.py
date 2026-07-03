@@ -318,27 +318,15 @@ class WABot:
                           // sadece ilk mesajda gösterir; sonrakiler için bunu kullan
     rows.forEach((el, idx) => {
         // ── Giden mesajları atla (botun kendi yazdıkları) ──────────────────
-        // WhatsApp Web farklı versiyonlarda farklı class/attribute kullanır,
-        // bu yüzden birden fazla yöntemle kontrol ediyoruz:
-        // 1) Eski sürüm class adı
+        // data-id özelliği msg-container'ın ÜSTÜNDE bir elementin üzerindedir,
+        // bu yüzden DOM'da yukarı çıkarak buluyoruz.
         if (el.closest('[class*="message-out"]')) return;
-        // 2) Yeni sürüm: data-id "true_" ile başlıyorsa giden mesaj
-        const dataId = el.getAttribute('data-id') || '';
-        if (dataId.startsWith('true_')) return;
-        // 3) focusable wrapper'da "out" geçiyorsa
-        const wrapper = el.closest('[class*="focusable"]') ||
-                        el.closest('[class*="_akbu"]') ||
-                        el.parentElement;
-        if (wrapper) {
-            const cls = wrapper.className || '';
-            if (cls.includes('out') || cls.includes('_akbu')) return;
+        let dataIdEl = el;
+        while (dataIdEl && !dataIdEl.getAttribute('data-id')) {
+            dataIdEl = dataIdEl.parentElement;
         }
-        // 4) Mesaj kutusunun sağ tarafta olup olmadığını kontrol et
-        //    (giden mesajlar sağa yaslanır)
-        const rect = el.getBoundingClientRect();
-        const parentRect = el.parentElement ?
-                           el.parentElement.getBoundingClientRect() : null;
-        if (parentRect && rect.left > parentRect.left + parentRect.width * 0.5) return;
+        const dataId = dataIdEl ? (dataIdEl.getAttribute('data-id') || '') : '';
+        if (dataId.startsWith('true_')) return;
 
         // Metin
         let text = '';
@@ -665,15 +653,27 @@ class WABot:
                 if not sender or sender == "Bilinmiyor":
                     continue
 
-                # Botun kendi yazdığı yanıt metinleri geri okunursa atla
-                # (giden mesaj JS filtresi tutmazsa bu Python filtresi tutar)
+                # ── Botun kendi mesajlarını atla ────────────────────────────
+                # Yöntem 1: Botun yazdığı yanıtlar her zaman bu öneklerle başlar.
+                # Gerçek kullanıcılar bu şekilde mesaj atmaz — en güvenilir filtre.
+                BOT_PREFIKSLERI = (
+                    "✅ Komutlar alındı",
+                    "❌ Uygunsuz mesaj",
+                    "ℹ️ Bu mesaj bugün",
+                    "❌ Komut okunmadı",
+                    "📧 WA erişim",
+                    "🧹 Grup sohbeti",
+                )
+                if any(text.startswith(p) for p in BOT_PREFIKSLERI):
+                    continue
+
+                # Yöntem 2: Daha önce gönderilen yanıt metinleri seti
                 if text.strip() in self._son_yanit_metinleri:
                     continue
 
-                # Botun kendi gönderdiği mesajları atla (grup adıyla aynı sender)
-                grup_adi_norm = turkce_norm(
-                    load_config().get("wa_group_name",""))
-                if turkce_norm(sender) == grup_adi_norm:
+                # Yöntem 3: Grup adıyla aynı sender (bazı WA sürümlerinde bot böyle görünür)
+                grup_adi_norm = turkce_norm(load_config().get("wa_group_name",""))
+                if grup_adi_norm and turkce_norm(sender) == grup_adi_norm:
                     continue
 
                 # Resimleri indir
