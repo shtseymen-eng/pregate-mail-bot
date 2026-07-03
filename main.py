@@ -249,16 +249,15 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi, img_
 # ══════════════════════════════════════════════════════════════════════════════
 class MesajBiriktiric:
     def __init__(self, on_gonder, bekleme=BEKLEME_SURE):
-        self.on_gonder  = on_gonder
-        self.bekleme    = bekleme
-        self._kuyruk    = {}
-        self._gonderildi = set()  # mail atılan kişiler
-        self._lock      = threading.Lock()
+        self.on_gonder   = on_gonder
+        self.bekleme     = bekleme
+        self._kuyruk     = {}
+        self._gonderildi = set()
+        self._lock       = threading.Lock()
 
     def ekle(self, gonderen, metin, img_paths=None):
         """Yeni mesaj geldi — biriktiriciye ekle, timer sıfırla."""
         with self._lock:
-            # Daha önce mail atılmış ama yeni mesaj geldi — blokeden çıkar
             self._gonderildi.discard(gonderen)
             if gonderen not in self._kuyruk:
                 self._kuyruk[gonderen] = {
@@ -281,9 +280,9 @@ class MesajBiriktiric:
             veri     = self._kuyruk.pop(gonderen)
             metinler = veri["metinler"]
             resimler = veri["resimler"]
-            # Mail gönderildikten sonra bu kişiyi bloke et
             self._gonderildi.add(gonderen)
         if metinler:
+            # on_gonder çağrısı sonucunda WA yanıtı ne olacağını döndürür
             self.on_gonder(gonderen, "\n".join(metinler), resimler)
 
     def temizle(self):
@@ -394,11 +393,10 @@ class WABot:
     });
     """
 
-    def __init__(self, on_log, on_status, on_message, on_wa_yanit=None):
-        self.on_log      = on_log
-        self.on_status   = on_status
-        self.on_message  = on_message
-        self.on_wa_yanit = on_wa_yanit  # WA'ya otomatik yanıt callback'i
+    def __init__(self, on_log, on_status, on_message):
+        self.on_log     = on_log
+        self.on_status  = on_status
+        self.on_message = on_message
         self.running          = False
         self._driver          = None
         self._manuel_durdurma = False  # True ise otomatik restart yapılmaz
@@ -697,10 +695,6 @@ class WABot:
 
                 if not eslesen_kw:
                     self.on_log(f"💬 [{sender}]: eşleşme yok — {text[:40]}")
-                    # Uygunsuz içerik yanıtı varsa WA'ya gönder
-                    uygunsuz_cevap = cfg_check.get("uygunsuz_cevap","").strip()
-                    if uygunsuz_cevap and self.on_wa_yanit:
-                        self.on_wa_yanit(uygunsuz_cevap)
                     continue
 
                 self.on_log(f"📩 [{sender}]: {text[:60]}"
@@ -1506,17 +1500,8 @@ class App(ctk.CTk):
         self._log("🚀 Bot başlatılıyor…")
         self.wa_bot=WABot(on_log=self._log,
                           on_status=self._set_durum_p,
-                          on_message=self._on_mesaj_bitti,
-                          on_wa_yanit=self._wa_uygunsuz_yanit)
+                          on_message=self._on_mesaj_bitti)
         threading.Thread(target=self.wa_bot.start,daemon=True).start()
-
-    def _wa_uygunsuz_yanit(self, metin):
-        """Eşleşme yoksa WA grubuna uygunsuz içerik yanıtı gönder."""
-        if self.wa_bot:
-            def _gonder():
-                self.wa_bot.wa_yanit_gonder(metin)
-                self._log(f"💬 WA uygunsuz yanıtı: {metin[:50]}")
-            threading.Thread(target=_gonder, daemon=True).start()
 
     def _durdur(self):
         self.running=False
@@ -1537,57 +1522,109 @@ class App(ctk.CTk):
 
     def _rapor(self): RaporPencere(self)
 
-    def _on_mesaj_bitti(self,gonderen,birlesik_metin,resimler=None):
+    def _wa_yanit_gonder(self, metin):
+        """WA grubuna yanıt gönder — thread'de çalışır."""
+        if not metin or not self.wa_bot:
+            return
+        def _g(m=metin):
+            ok = self.wa_bot.wa_yanit_gonder(m)
+            if ok:
+                self._log(f"💬 WA yanıtı gönderildi: {m[:60]}")
+            else:
+                self._log(f"⚠ WA yanıtı gönderilemedi")
+        threading.Thread(target=_g, daemon=True).start()
+
+    def _on_mesaj_bitti(self, gonderen, birlesik_metin, resimler=None):
         cfg  = load_config()
         norm = turkce_norm
 
-        # Göndereni mailde gösterilecek forma getir
-        # (numara → ****XXXX, kayıtlı kişi → gerçek isim)
+        # Göndereni mailde gösterilecek forma getir (numara→****XXXX, isim→isim)
         gonderen_mail = gonderen_goster(gonderen)
 
-        # Gün bazlı duplicate kontrolü:
-        # Bugün aynı gönderen + aynı içerik için zaten mail atıldıysa atla
+        # ── Gün bazlı duplicate kontrolü ────────────────────────────────────
+        # Bugün aynı gönderen + aynı içerik için zaten mail atıldıysa atla.
+        # Program kapansa bile DB'den kontrol edilir (restart güvenli).
         if db_bugun_gonderildi_mi(gonderen, birlesik_metin):
             self._log(f"⏭ Bugün zaten gönderildi, atlanıyor: {gonderen_mail}")
+            self._wa_yanit_gonder(
+                "ℹ️ Bu mesaj bugün daha önce işlendi, tekrar mail gönderilmedi.")
             return
 
+        # ── Kural eşleştirme ────────────────────────────────────────────────
         metin_lower = norm(birlesik_metin)
         eslesen = []
-        for kural in cfg.get("kurallar",[]):
-            for kw in kural.get("keywords",[]):
+        for kural in cfg.get("kurallar", []):
+            for kw in kural.get("keywords", []):
                 if norm(kw) in metin_lower:
                     eslesen.append(kural); break
+
         if not eslesen:
-            self._log(f"💬 [{gonderen_mail}]: eşleşme yok")
+            uygunsuz = cfg.get("uygunsuz_cevap", "").strip()
+            if not uygunsuz:
+                uygunsuz = (
+                    "❌ Komut okunmadı — mesaj tanımlı kurallara uymadı.\n"
+                    "Lütfen araç plakası ve işlem bilgisini içeren mesajı\n"
+                    "doğru formatta tekrar gönderin."
+                )
+            self._log(f"💬 [{gonderen_mail}]: eşleşme yok — komut hatası WA yanıtı gönderildi")
+            self._wa_yanit_gonder(uygunsuz)
             return
-        from_acc = cfg.get("outlook_account","") or None
+
+        # ── Mail gönderimi ───────────────────────────────────────────────────
+        from_acc          = cfg.get("outlook_account", "") or None
+        grup_adi          = cfg.get("wa_group_name", "")
+        basarili_kurallar = []   # (kural_ad, wa_cevap_ozel)
+        basarisiz_kurallar= []
+
         for kural in eslesen:
-            ml = kural.get("mail_list",[])
+            ml = kural.get("mail_list", [])
             if not ml:
-                self._log(f"⚠ '{kural.get('ad')}' mail listesi boş!"); continue
-            ok,info = send_mail(ml, kural["ad"], gonderen_mail, birlesik_metin,
-                                from_acc, cfg.get("wa_group_name",""),
-                                resimler or [])
+                self._log(f"⚠ '{kural.get('ad')}' mail listesi boş!")
+                basarisiz_kurallar.append(kural.get("ad","?"))
+                continue
+
+            ok, info = send_mail(
+                ml, kural["ad"], gonderen_mail, birlesik_metin,
+                from_acc, grup_adi, resimler or [])
+
             if ok:
                 self.mail_say += 1
-                self.after(0, lambda: self.lbl_sayac.configure(text=str(self.mail_say)))
+                self.after(0, lambda: self.lbl_sayac.configure(
+                    text=str(self.mail_say)))
                 db_ekle(gonderen, kural["ad"], birlesik_metin, bool(resimler))
                 self._log(f"✉ [{kural['ad']}] {gonderen_mail} → "
                           f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}")
-                # WA otomatik yanıt:
-                # Önce kural bazlı wa_cevap, yoksa global "mail atıldı" mesajı
-                wa_cevap = kural.get("wa_cevap","").strip()
-                if not wa_cevap:
-                    wa_cevap = f"✅ [{kural['ad']}] Mail gönderildi."
-                if self.wa_bot:
-                    def _wa_gonder(cevap=wa_cevap):
-                        ok2 = self.wa_bot.wa_yanit_gonder(cevap)
-                        if ok2:
-                            self._log(f"💬 WA yanıtı: {cevap[:50]}")
-                    import threading
-                    threading.Thread(target=_wa_gonder, daemon=True).start()
+                wa_cevap_ozel = kural.get("wa_cevap", "").strip()
+                basarili_kurallar.append((kural["ad"], wa_cevap_ozel))
             else:
                 self._log(f"❌ [{kural['ad']}] Mail hatası: {info}")
+                basarisiz_kurallar.append(kural.get("ad","?"))
+
+        # ── Tüm kurallar bittikten sonra TEK WA yanıtı gönder ───────────────
+        tarih_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        parcalar  = []
+
+        if basarili_kurallar:
+            # Kural bazlı özel yanıt varsa onu kullan, yoksa otomatik oluştur
+            for (kural_ad, wa_ozel) in basarili_kurallar:
+                if wa_ozel:
+                    parcalar.append(wa_ozel)
+                else:
+                    parcalar.append(
+                        f"✅ Mail gönderildi.\n"
+                        f"Grup  : {kural_ad}\n"
+                        f"Tarih : {tarih_str}"
+                    )
+
+        if basarisiz_kurallar:
+            gruplar_hata = ", ".join(basarisiz_kurallar)
+            parcalar.append(
+                f"❌ Mail gönderilemedi: {gruplar_hata}\n"
+                f"Sistem yöneticisini bilgilendirin."
+            )
+
+        if parcalar:
+            self._wa_yanit_gonder("\n\n".join(parcalar))
 
     def _log(self,msg):
         ts=datetime.now().strftime("%H:%M:%S")
