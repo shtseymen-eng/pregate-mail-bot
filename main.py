@@ -92,18 +92,32 @@ def save_config(cfg):
 # ── Kayıt DB ────────────────────────────────────────────────────────────────
 def db_init():
     con = _sqlite3.connect(DB_FILE)
+
+    # ── kayitlar tablosu ──────────────────────────────────────────────────────
     con.execute("""CREATE TABLE IF NOT EXISTS kayitlar (
         id TEXT PRIMARY KEY, tarih TEXT, gonderen TEXT,
         kural_ad TEXT, mesaj TEXT, resim_var INTEGER DEFAULT 0)""")
-    # Gönderilmiş mesajları restart sonrasında da hatırlamak için kalıcı tablo.
-    # msg_id = WhatsApp mesaj ID'si (data-id veya fallback).
-    # Eski kayıtları 48 saat sonra otomatik sil.
+
+    # ── seen_mesajlar tablosu ─────────────────────────────────────────────────
+    # Eski sürümlerde bu tablo sadece msg_id ile oluşturulmuştu (zaman kolonu yok).
+    # CREATE TABLE IF NOT EXISTS şema değişikliği yapmaz, bu yüzden migration gerekli.
     con.execute("""CREATE TABLE IF NOT EXISTS seen_mesajlar (
-        msg_id TEXT PRIMARY KEY, zaman REAL)""")
+        msg_id TEXT PRIMARY KEY, zaman REAL DEFAULT 0)""")
+
+    # Migration: zaman kolonu yoksa ekle (eski DB'lerle uyumluluk)
+    try:
+        con.execute("SELECT zaman FROM seen_mesajlar LIMIT 1")
+    except _sqlite3.OperationalError:
+        # zaman kolonu yok — ekle ve tüm mevcut kayıtlara şimdiki zamanı yaz
+        con.execute("ALTER TABLE seen_mesajlar ADD COLUMN zaman REAL DEFAULT 0")
+        con.execute("UPDATE seen_mesajlar SET zaman = ?", (time.time(),))
+
     # 48 saatten eski seen kayıtlarını temizle
-    con.execute("DELETE FROM seen_mesajlar WHERE zaman < ?",
+    con.execute("DELETE FROM seen_mesajlar WHERE zaman < ? AND zaman != 0",
                 (time.time() - 172800,))
-    con.commit(); con.close()
+
+    con.commit()
+    con.close()
 
 def db_seen_yukle():
     """Uygulama başlarken son 48 saatin seen msg_id'lerini belleğe al."""
