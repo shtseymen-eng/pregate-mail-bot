@@ -77,6 +77,15 @@ def turkce_norm(s):
            .replace("\u0307", ""))  # kalan olası birleşik nokta işaretlerini temizle
     return s
 
+# Botun WA'ya yazdığı yanıt metinlerinin önekleri.
+# Bu öneklerle başlayan mesajlar botun kendi mesajıdır — işlenmez.
+_BOT_PREFIKSLERI = (
+    "✅ Mail atıldı", "Mail atıldı",
+    "Komutlar alınmadı", "⚠️ Komutlar alınmadı",
+    "ℹ️ Bu mesaj bugün", "Bu mesaj bugün",
+    "❌ Mail gönderilemedi", "Mail gönderilemedi",
+)
+
 # ── Config ──────────────────────────────────────────────────────────────────
 def load_config():
     try:
@@ -642,40 +651,20 @@ class WABot:
                 if not msg_id or msg_id in self._seen:
                     continue
                 self._seen[msg_id] = now_ts
-                db_seen_kaydet(msg_id)  # restart'a karşı kalıcı hafıza
+                db_seen_kaydet(msg_id)
 
                 # Bot başlamadan önceki mesajları atla
                 if msg_time and self._baslangic:
-                    if msg_time < self._baslangic - 30:  # 30sn tolerans
+                    if msg_time < self._baslangic - 30:
                         continue
 
                 # Boş göndereni atla
                 if not sender or sender == "Bilinmiyor":
                     continue
 
-                # ── Botun kendi mesajlarını atla ────────────────────────────
-                # Yöntem 1: Botun yazdığı yanıtlar her zaman bu öneklerle başlar.
-                # Gerçek kullanıcılar bu şekilde mesaj atmaz — en güvenilir filtre.
-                BOT_PREFIKSLERI = (
-                    "✅ Mail atıldı", "Mail atıldı",
-                    "✅ Komutlar alındı", "Komutlar alındı",
-                    "❌ Uygunsuz mesaj", "Uygunsuz mesaj",
-                    "⚠️ Gönderilen metin", "Gönderilen metin mail",
-                    "ℹ️ Bu mesaj bugün", "Bu mesaj bugün",
-                    "❌ Komut okunmadı", "Komut okunmadı",
-                    "❌ Mail gönderilemedi", "Mail gönderilemedi",
-                )
-                txt_strip = text.strip()
-                if any(txt_strip.startswith(p) for p in BOT_PREFIKSLERI):
-                    continue
-
-                # Yöntem 2: Daha önce gönderilen yanıt metinleri seti
-                if text.strip() in self._son_yanit_metinleri:
-                    continue
-
-                # Yöntem 3: Grup adıyla aynı sender (bazı WA sürümlerinde bot böyle görünür)
-                grup_adi_norm = turkce_norm(load_config().get("wa_group_name",""))
-                if grup_adi_norm and turkce_norm(sender) == grup_adi_norm:
+                # Grup adıyla aynı sender = botun kendi hesabı
+                _grup_norm = turkce_norm(load_config().get("wa_group_name",""))
+                if _grup_norm and turkce_norm(sender) == _grup_norm:
                     continue
 
                 # Resimleri indir
@@ -730,9 +719,15 @@ class WABot:
                 if not text:
                     continue
 
-                # Tüm mesajları biriktiriciye ekle.
-                # Keyword kontrolü _on_mesaj_bitti'de yapılır —
-                # eşleşme varsa mail, yoksa uygunsuz WA yanıtı gönderilir.
+                # ── Botun kendi mesajlarını kesinlikle işleme ───────────────
+                txt_strip = text.strip()
+                # Prefix kontrolü: botun her yanıtı bu kalıplarla başlar
+                if any(txt_strip.startswith(p) for p in _BOT_PREFIKSLERI):
+                    continue
+                # Son gönderilen yanıtlar seti
+                if txt_strip in self._son_yanit_metinleri:
+                    continue
+
                 self.on_log(f"📩 [{sender}]: {text[:60]}"
                             + (f"  📎{len(img_paths)}" if img_paths else ""))
                 self._biriktiric.ekle(sender, text, img_paths)
@@ -1275,8 +1270,7 @@ class AyarlarPencere(ctk.CTkToplevel):
                                             wrap="word")
         self.txt_uygunsuz.insert("1.0",
             load_config().get("uygunsuz_cevap",
-                "❌ Bu mesaj içeriği uygun formatta değil.\n"
-                "Lütfen araç plakası ve yükleme bilgilerini içerecek şekilde düzenleyip tekrar gönderin."))
+                "Komutlar alınmadı, lütfen düzenleme yapıp tekrar yazınız."))
         self.txt_uygunsuz.pack(fill="x", padx=14, pady=(0,12))
 
     def _build_kurallar(self, parent):
@@ -1763,21 +1757,10 @@ class App(ctk.CTk):
                     eslesen.append(kural); break
 
         if not eslesen:
-            # Ayarlarda özel mesaj varsa onu kullan, yoksa otomatik oluştur
             uygunsuz = cfg.get("uygunsuz_cevap", "").strip()
             if not uygunsuz:
-                kural_listesi = []
-                for k in cfg.get("kurallar", []):
-                    kw_str = ", ".join(k.get("keywords", []))
-                    kural_listesi.append(f"• {k.get('ad','?')} → {kw_str}")
-                komutlar_str = "\n".join(kural_listesi) if kural_listesi else "• (Kural tanımlanmamış)"
-                uygunsuz = (
-                    "⚠️ Gönderilen metin mail atılabilir formatta değil.\n\n"
-                    "Mail gönderilebilmesi için mesajınızda\n"
-                    "departman komutu bulunmalıdır:\n\n"
-                    f"{komutlar_str}"
-                )
-            self._log(f"💬 [{gonderen_mail}]: eşleşme yok — komut hatası WA yanıtı gönderildi")
+                uygunsuz = "Komutlar alınmadı, lütfen düzenleme yapıp tekrar yazınız."
+            self._log(f"💬 [{gonderen_mail}]: eşleşme yok")
             self._wa_yanit_gonder(uygunsuz)
             return
 
