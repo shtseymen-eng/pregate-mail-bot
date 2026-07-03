@@ -436,6 +436,7 @@ class WABot:
         self._driver          = None
         self._manuel_durdurma = False  # True ise otomatik restart yapılmaz
         self._baglanti_hata_say = 0    # ard arda bağlantı hata sayacı
+        self._son_yanit_metinleri = set()  # botun WA'ya yazdığı yanıtlar
         # Restart sonrasında eski mesajları tekrar işlememek için
         # seen listesi DB'den yükleniyor (48 saatlik hafıza)
         self._seen       = db_seen_yukle()
@@ -664,11 +665,12 @@ class WABot:
                 if not sender or sender == "Bilinmiyor":
                     continue
 
-                # Botun kendi yazdığı yanıt mesajlarını atla:
-                # WA'daki bot hesabı genelde "Pregate Kayıt Red" (grup adı) 
-                # ya da config'deki grup adıyla aynı isimde görünür.
-                # data-id "true_" ile başlıyorsa zaten JS'te filtrelendi,
-                # ama güvenlik için Python'da da kontrol et.
+                # Botun kendi yazdığı yanıt metinleri geri okunursa atla
+                # (giden mesaj JS filtresi tutmazsa bu Python filtresi tutar)
+                if text.strip() in self._son_yanit_metinleri:
+                    continue
+
+                # Botun kendi gönderdiği mesajları atla (grup adıyla aynı sender)
                 grup_adi_norm = turkce_norm(
                     load_config().get("wa_group_name",""))
                 if turkce_norm(sender) == grup_adi_norm:
@@ -1024,6 +1026,11 @@ class WABot:
                 input_box.send_keys(Keys.ENTER)
 
             time.sleep(0.5)
+            # Gönderilen metni hafızaya al — geri okunmasını engelle
+            self._son_yanit_metinleri.add(metin.strip())
+            # Seti 50 kayıtla sınırla
+            if len(self._son_yanit_metinleri) > 50:
+                self._son_yanit_metinleri.pop()
             return True
 
         except Exception as e:
