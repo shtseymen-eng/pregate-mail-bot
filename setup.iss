@@ -21,36 +21,12 @@ Name: "startupicon"; Description: "Windows başlangıcında otomatik çalıştı
 [Files]
 Source: "dist\PregateMail\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-[Code]
-procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
-begin
-end;
-
-procedure InitializeWizard();
-begin
-end;
-
-// Kurulum bittikten sonra config yoksa kopyala
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  ConfigDest: String;
-  ConfigSrc: String;
-begin
-  if CurStep = ssPostInstall then
-  begin
-    ConfigDest := ExpandConstant('{app}\config.json');
-    ConfigSrc  := ExpandConstant('{app}\config.json');
-    // Zaten var, bir şey yapma
-  end;
-end;
-
 [Icons]
 Name: "{group}\Pregate Mail Botu"; Filename: "{app}\PregateMail.exe"
 Name: "{group}\Kaldır"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Pregate Mail Botu"; Filename: "{app}\PregateMail.exe"; Tasks: desktopicon
-
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PregateMail"; ValueData: """{app}\PregateMail.exe"""; Flags: uninsdeletevalue; Tasks: startupicon
+; Registry yerine Başlangıç klasörüne kısayol — izin gerektirmez
+Name: "{userstartup}\Pregate Mail Botu"; Filename: "{app}\PregateMail.exe"; Tasks: startupicon
 
 [Run]
 Filename: "{app}\PregateMail.exe"; Description: "Programı şimdi başlat"; Flags: nowait postinstall skipifsilent
