@@ -317,7 +317,28 @@ class WABot:
     let sonGonderen = ''; // WhatsApp art arda gelen mesajlarda gönderen adını
                           // sadece ilk mesajda gösterir; sonrakiler için bunu kullan
     rows.forEach((el, idx) => {
+        // ── Giden mesajları atla (botun kendi yazdıkları) ──────────────────
+        // WhatsApp Web farklı versiyonlarda farklı class/attribute kullanır,
+        // bu yüzden birden fazla yöntemle kontrol ediyoruz:
+        // 1) Eski sürüm class adı
         if (el.closest('[class*="message-out"]')) return;
+        // 2) Yeni sürüm: data-id "true_" ile başlıyorsa giden mesaj
+        const dataId = el.getAttribute('data-id') || '';
+        if (dataId.startsWith('true_')) return;
+        // 3) focusable wrapper'da "out" geçiyorsa
+        const wrapper = el.closest('[class*="focusable"]') ||
+                        el.closest('[class*="_akbu"]') ||
+                        el.parentElement;
+        if (wrapper) {
+            const cls = wrapper.className || '';
+            if (cls.includes('out') || cls.includes('_akbu')) return;
+        }
+        // 4) Mesaj kutusunun sağ tarafta olup olmadığını kontrol et
+        //    (giden mesajlar sağa yaslanır)
+        const rect = el.getBoundingClientRect();
+        const parentRect = el.parentElement ?
+                           el.parentElement.getBoundingClientRect() : null;
+        if (parentRect && rect.left > parentRect.left + parentRect.width * 0.5) return;
 
         // Metin
         let text = '';
@@ -643,12 +664,15 @@ class WABot:
                 if not sender or sender == "Bilinmiyor":
                     continue
 
-                # NOT: Daha önce burada "sender zaten gönderildi setindeyse atla"
-                # kontrolü vardı. Bu kontrol mesajı _seen'e işaretleyip
-                # biriktiriciye hiç eklemiyordu, yani mesaj kalıcı olarak
-                # kayboluyordu. MesajBiriktiric.ekle() zaten yeni mesaj
-                # geldiğinde gönderildi bloğunu otomatik kaldırıyor, bu yüzden
-                # bu erken-çıkışa hiç gerek yok — kaldırıldı.
+                # Botun kendi yazdığı yanıt mesajlarını atla:
+                # WA'daki bot hesabı genelde "Pregate Kayıt Red" (grup adı) 
+                # ya da config'deki grup adıyla aynı isimde görünür.
+                # data-id "true_" ile başlıyorsa zaten JS'te filtrelendi,
+                # ama güvenlik için Python'da da kontrol et.
+                grup_adi_norm = turkce_norm(
+                    load_config().get("wa_group_name",""))
+                if turkce_norm(sender) == grup_adi_norm:
+                    continue
 
                 # Resimleri indir
                 img_paths = []
