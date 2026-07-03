@@ -1339,6 +1339,8 @@ class App(ctk.CTk):
         self.title("Pregate Kayıt Red – WA Mail Botu  |  Poliport")
         self.geometry("900x640"); self.minsize(800,540)
         self.configure(fg_color=RENK_ANA_ARKA)
+        self.state("normal")   # minimize/hidden durumdan çıkar
+        self.deiconify()       # gizliyse göster
         self.wa_bot=None; self.running=False; self.mail_say=0
         db_init(); self._build_ui()
 
@@ -1518,8 +1520,17 @@ if __name__=="__main__":
     root=tk.Tk(); root.withdraw()
     splash=SplashEkran(root); splash.update()
     def _ac():
-        splash.kapat(); root.destroy()
+        try:
+            splash.kapat()
+        except: pass
+        try:
+            root.destroy()
+        except: pass
         app=App()
+        # Pencerenin ekranda kesinlikle görünmesini sağla
+        app.deiconify()
+        app.lift()
+        app.focus_force()
         app.protocol("WM_DELETE_WINDOW",app.on_close)
         app.mainloop()
     root.after(2500,_ac)
