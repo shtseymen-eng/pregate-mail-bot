@@ -757,13 +757,26 @@ class WABot:
 
     def wa_yanit_gonder(self, metin):
         """WhatsApp Web'deki açık gruba otomatik yanıt yazar ve gönderir.
-        send_keys ile metin kutusuna yazar, ardından Enter tuşuna basar."""
+
+        Yöntem:
+        1. Metni JS ile panoya (clipboard) kopyala
+        2. Input kutusuna Ctrl+V ile yapıştır → React state doğru tetiklenir
+        3. Gönder butonuna tıkla (Enter'dan daha güvenilir)
+        """
         if not metin or not self._driver:
             return False
         try:
             from selenium.webdriver.common.keys import Keys
-            # Mesaj giriş kutusunu bul (WhatsApp Web'in farklı sürümleri için
-            # birden fazla seçici deniyoruz)
+            from selenium.webdriver.common.action_chains import ActionChains
+
+            # 1) Metni JS clipboard'a yaz
+            metin_js = metin.replace("\\", "\\\\").replace("`", "\\`")
+            self._driver.execute_script(
+                f"navigator.clipboard.writeText(`{metin_js}`).catch(()=>{{}});"
+            )
+            time.sleep(0.2)
+
+            # 2) Mesaj giriş kutusunu bul ve tıkla
             selectors = [
                 '[data-testid="conversation-compose-box-input"]',
                 'div[contenteditable="true"][data-tab="10"]',
@@ -773,37 +786,46 @@ class WABot:
             input_box = None
             for sel in selectors:
                 try:
-                    input_box = WebDriverWait(self._driver, 4).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                    input_box = WebDriverWait(self._driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
                     break
                 except: continue
             if not input_box:
                 self.on_log("⚠ WA yanıt kutusu bulunamadı")
                 return False
+
             input_box.click()
             time.sleep(0.3)
-            # Türkçe karakterler için JS ile yaz (send_keys Türkçeyi bozabilir)
-            self._driver.execute_script(
-                "arguments[0].focus();"
-                "document.execCommand('selectAll', false, null);"
-                "document.execCommand('delete', false, null);",
-                input_box)
-            time.sleep(0.1)
-            for satir in metin.split("\n"):
-                if satir:
-                    self._driver.execute_script(
-                        "arguments[0].focus();"
-                        "document.execCommand('insertText', false, arguments[1]);",
-                        input_box, satir)
-                else:
-                    # Boş satır = Shift+Enter (yeni satır)
-                    input_box.send_keys(Keys.SHIFT, Keys.ENTER)
-                time.sleep(0.05)
-            time.sleep(0.3)
-            # ENTER ile gönder
-            input_box.send_keys(Keys.ENTER)
+
+            # 3) Ctrl+V ile yapıştır — React'ın input eventlerini doğru tetikler
+            input_box.send_keys(Keys.CONTROL, 'v')
+            time.sleep(0.5)
+
+            # 4) Gönder butonunu bul ve tıkla (En güvenilir yöntem)
+            send_selectors = [
+                '[data-testid="send"]',
+                '[data-testid="compose-btn-send"]',
+                'button[aria-label="Gönder"]',
+                'button[aria-label="Send"]',
+                'span[data-testid="send"]',
+            ]
+            sent = False
+            for sel in send_selectors:
+                try:
+                    btn = WebDriverWait(self._driver, 3).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    btn.click()
+                    sent = True
+                    break
+                except: continue
+
+            # 5) Gönder butonu bulunamadıysa Enter ile dene
+            if not sent:
+                input_box.send_keys(Keys.ENTER)
+
             time.sleep(0.5)
             return True
+
         except Exception as e:
             self.on_log(f"⚠ WA yanıt gönderilemedi: {str(e)[:80]}")
             return False
