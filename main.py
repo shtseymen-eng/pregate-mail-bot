@@ -1646,21 +1646,11 @@ class App(ctk.CTk):
 
 
 if __name__=="__main__":
-    root=tk.Tk(); root.withdraw()
-    splash=SplashEkran(root); splash.update()
-    def _ac():
-        try:
-            splash.kapat()
-        except: pass
-        try:
-            root.destroy()
-        except: pass
-        app=App()
-        # Pencerenin ekranda kesinlikle görünmesini sağla
-        app.deiconify()
-        app.lift()
-        app.focus_force()
-        app.protocol("WM_DELETE_WINDOW",app.on_close)
-        app.mainloop()
-    root.after(2500,_ac)
-    root.mainloop()
+    # App doğrudan başlar — tek mainloop, siyah pencere sorunu yok.
+    # Splash ayrı bir tk.Tk() kökü içinde açılmıyor; App'in kendi
+    # Toplevel'ı olarak açılıp 2.5 saniye sonra kapanıyor.
+    app = App()
+    splash = SplashEkran(app)
+    app.after(2500, splash.kapat)
+    app.protocol("WM_DELETE_WINDOW", app.on_close)
+    app.mainloop()
