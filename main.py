@@ -894,24 +894,31 @@ class WABot:
         """WhatsApp Web'deki açık gruba otomatik yanıt yazar ve gönderir.
 
         Yöntem:
-        1. Metni JS ile panoya (clipboard) kopyala
-        2. Input kutusuna Ctrl+V ile yapıştır → React state doğru tetiklenir
-        3. Gönder butonuna tıkla (Enter'dan daha güvenilir)
+        1. Metni Windows panosuna win32clipboard ile yaz (kesinlikle çalışır)
+        2. Input kutusuna Ctrl+A → Ctrl+V ile yapıştır (React state tetiklenir)
+        3. Gönder butonuna tıkla; bulunamazsa Enter ile gönder
         """
         if not metin or not self._driver:
             return False
         try:
             from selenium.webdriver.common.keys import Keys
-            from selenium.webdriver.common.action_chains import ActionChains
 
-            # 1) Metni JS clipboard'a yaz
-            metin_js = metin.replace("\\", "\\\\").replace("`", "\\`")
-            self._driver.execute_script(
-                f"navigator.clipboard.writeText(`{metin_js}`).catch(()=>{{}});"
-            )
+            # 1) Metni Windows panosuna yaz (JS clipboard'dan çok daha güvenilir)
+            try:
+                import win32clipboard
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(metin, win32clipboard.CF_UNICODETEXT)
+                win32clipboard.CloseClipboard()
+            except Exception:
+                # Fallback: JS clipboard (win32clipboard yoksa)
+                metin_js = metin.replace("\\", "\\\\").replace("`", "\\`")
+                self._driver.execute_script(
+                    f"navigator.clipboard.writeText(`{metin_js}`).catch(()=>{{}});"
+                )
             time.sleep(0.2)
 
-            # 2) Mesaj giriş kutusunu bul ve tıkla
+            # 2) Mesaj giriş kutusunu bul
             selectors = [
                 '[data-testid="conversation-compose-box-input"]',
                 'div[contenteditable="true"][data-tab="10"]',
@@ -929,14 +936,15 @@ class WABot:
                 self.on_log("⚠ WA yanıt kutusu bulunamadı")
                 return False
 
+            # 3) Tıkla, varsa eski içeriği temizle, yapıştır
             input_box.click()
             time.sleep(0.3)
-
-            # 3) Ctrl+V ile yapıştır — React'ın input eventlerini doğru tetikler
-            input_box.send_keys(Keys.CONTROL, 'v')
+            input_box.send_keys(Keys.CONTROL + 'a')   # hepsini seç
+            time.sleep(0.1)
+            input_box.send_keys(Keys.CONTROL + 'v')   # yapıştır
             time.sleep(0.5)
 
-            # 4) Gönder butonunu bul ve tıkla (En güvenilir yöntem)
+            # 4) Gönder butonuna tıkla
             send_selectors = [
                 '[data-testid="send"]',
                 '[data-testid="compose-btn-send"]',
@@ -954,7 +962,7 @@ class WABot:
                     break
                 except: continue
 
-            # 5) Gönder butonu bulunamadıysa Enter ile dene
+            # 5) Gönder butonu bulunamazsa Enter dene
             if not sent:
                 input_box.send_keys(Keys.ENTER)
 
