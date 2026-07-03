@@ -311,7 +311,7 @@ class MesajBiriktiric:
 # ══════════════════════════════════════════════════════════════════════════════
 class WABot:
     # JavaScript: sayfadaki son gelen mesajları oku (metin + resim URL + zaman)
-    JS_MESAJLARI_OKU = """
+    JS_MESAJLARI_OKU = r"""
     const mesajlar = [];
     const rows = document.querySelectorAll('[data-testid="msg-container"]');
     let sonGonderen = ''; // WhatsApp art arda gelen mesajlarda gönderen adını
