@@ -394,10 +394,11 @@ class WABot:
     });
     """
 
-    def __init__(self, on_log, on_status, on_message):
-        self.on_log     = on_log
-        self.on_status  = on_status
-        self.on_message = on_message
+    def __init__(self, on_log, on_status, on_message, on_wa_yanit=None):
+        self.on_log      = on_log
+        self.on_status   = on_status
+        self.on_message  = on_message
+        self.on_wa_yanit = on_wa_yanit  # WA'ya otomatik yanıt callback'i
         self.running          = False
         self._driver          = None
         self._manuel_durdurma = False  # True ise otomatik restart yapılmaz
@@ -573,8 +574,28 @@ class WABot:
             time.sleep(10)
 
     def _mesajlari_oku(self):
-        """JavaScript ile sayfadaki mesajları oku."""
+        """JavaScript ile sayfadaki mesajları oku.
+        Önce aktif sohbetin doğru grup olduğunu kontrol eder."""
         try:
+            # Aktif sohbet başlığını kontrol et — yanlış grupta mesaj okuma
+            cfg_now = load_config()
+            hedef_grup = cfg_now.get("wa_group_name","").strip()
+            if hedef_grup:
+                try:
+                    baslik = self._driver.execute_script("""
+                        const el = document.querySelector(
+                            '[data-testid="conversation-info-header-chat-title"],' +
+                            'header span[title],' +
+                            'div[data-testid="conversation-header"] span'
+                        );
+                        return el ? (el.innerText || el.getAttribute('title') || '') : '';
+                    """) or ""
+                    if baslik.strip() and baslik.strip() != hedef_grup:
+                        # Yanlış sohbetteyiz — sessizce doğru gruba geri dön
+                        self._gruba_git_sessiz()
+                        return
+                except: pass
+
             mesajlar = self._driver.execute_script(self.JS_MESAJLARI_OKU)
             if not mesajlar:
                 return
@@ -676,6 +697,10 @@ class WABot:
 
                 if not eslesen_kw:
                     self.on_log(f"💬 [{sender}]: eşleşme yok — {text[:40]}")
+                    # Uygunsuz içerik yanıtı varsa WA'ya gönder
+                    uygunsuz_cevap = cfg_check.get("uygunsuz_cevap","").strip()
+                    if uygunsuz_cevap and self.on_wa_yanit:
+                        self.on_wa_yanit(uygunsuz_cevap)
                     continue
 
                 self.on_log(f"📩 [{sender}]: {text[:60]}"
@@ -1012,6 +1037,28 @@ class AyarlarPencere(ctk.CTkToplevel):
         ctk.CTkLabel(row, text="dakika", text_color=RENK_YAZI2,
                      font=("Segoe UI",10)).pack(side="left")
 
+        # Uygunsuz İçerik Yanıtı alanı
+        uf = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
+        uf.pack(fill="x", padx=10, pady=6)
+        ctk.CTkLabel(uf, text="Uygunsuz İçerik WA Yanıtı",
+                     font=("Segoe UI",12,"bold"),
+                     text_color=RENK_YAZI).pack(anchor="w", padx=14, pady=(12,4))
+        ctk.CTkLabel(uf,
+                     text="Anahtar kelime eşleşmezse gruba otomatik bu mesaj yazılır. Boş bırakılırsa yanıt gönderilmez.",
+                     text_color=RENK_YAZI2, font=("Segoe UI",9), wraplength=480
+                     ).pack(anchor="w", padx=14, pady=(0,4))
+        self.txt_uygunsuz = ctk.CTkTextbox(uf, fg_color=RENK_PANEL,
+                                            border_color=RENK_SINIR,
+                                            text_color=RENK_YAZI,
+                                            font=("Segoe UI",10), height=60,
+                                            border_width=2, corner_radius=6,
+                                            wrap="word")
+        self.txt_uygunsuz.insert("1.0",
+            load_config().get("uygunsuz_cevap",
+                "❌ Bu mesaj içeriği uygun formatta değil.\n"
+                "Lütfen araç plakası ve yükleme bilgilerini içerecek şekilde düzenleyip tekrar gönderin."))
+        self.txt_uygunsuz.pack(fill="x", padx=14, pady=(0,12))
+
     def _build_kurallar(self, parent):
         parent.configure(fg_color=RENK_PANEL)
         kh = ctk.CTkFrame(parent, fg_color=RENK_PANEL)
@@ -1197,6 +1244,7 @@ class AyarlarPencere(ctk.CTkToplevel):
         cfg["wa_group_name"] = self.ent_grup.get().strip()
         try: cfg["bekleme_dk"] = max(1,int(self.ent_sure.get().strip()))
         except: cfg["bekleme_dk"] = 2
+        cfg["uygunsuz_cevap"] = self.txt_uygunsuz.get("1.0","end").strip()
         if hasattr(self,"cmb_outlook") and self.cmb_outlook:
             cfg["outlook_account"] = self.cmb_outlook.get().strip()
         kurallar=[]
@@ -1339,10 +1387,21 @@ class App(ctk.CTk):
         self.title("Pregate Kayıt Red – WA Mail Botu  |  Poliport")
         self.geometry("900x640"); self.minsize(800,540)
         self.configure(fg_color=RENK_ANA_ARKA)
-        self.state("normal")   # minimize/hidden durumdan çıkar
-        self.deiconify()       # gizliyse göster
+        self.state("normal")
+        self.deiconify()
         self.wa_bot=None; self.running=False; self.mail_say=0
         db_init(); self._build_ui()
+        # Siyah pencere sorununu önlemek için render zorla
+        self.after(100, self._render_zorla)
+
+    def _render_zorla(self):
+        """CustomTkinter bazen ilk açılışta render etmez — zorla yenile."""
+        try:
+            self.update_idletasks()
+            self.update()
+            self.lift()
+            self.focus_force()
+        except: pass
 
     def _build_ui(self):
         hdr=ctk.CTkFrame(self,fg_color=RENK_PANEL,corner_radius=0,height=56)
@@ -1425,8 +1484,17 @@ class App(ctk.CTk):
         self._log("🚀 Bot başlatılıyor…")
         self.wa_bot=WABot(on_log=self._log,
                           on_status=self._set_durum_p,
-                          on_message=self._on_mesaj_bitti)
+                          on_message=self._on_mesaj_bitti,
+                          on_wa_yanit=self._wa_uygunsuz_yanit)
         threading.Thread(target=self.wa_bot.start,daemon=True).start()
+
+    def _wa_uygunsuz_yanit(self, metin):
+        """Eşleşme yoksa WA grubuna uygunsuz içerik yanıtı gönder."""
+        if self.wa_bot:
+            def _gonder():
+                self.wa_bot.wa_yanit_gonder(metin)
+                self._log(f"💬 WA uygunsuz yanıtı: {metin[:50]}")
+            threading.Thread(target=_gonder, daemon=True).start()
 
     def _durdur(self):
         self.running=False
@@ -1481,17 +1549,19 @@ class App(ctk.CTk):
             if ok:
                 self.mail_say += 1
                 self.after(0, lambda: self.lbl_sayac.configure(text=str(self.mail_say)))
-                # DB'ye orijinal göndereni kaydet (duplicate kontrolü için)
                 db_ekle(gonderen, kural["ad"], birlesik_metin, bool(resimler))
                 self._log(f"✉ [{kural['ad']}] {gonderen_mail} → "
                           f"{', '.join(ml[:2])}{'…' if len(ml)>2 else ''}")
-                # WA otomatik yanıt (kural ayarlarında tanımlıysa)
+                # WA otomatik yanıt:
+                # Önce kural bazlı wa_cevap, yoksa global "mail atıldı" mesajı
                 wa_cevap = kural.get("wa_cevap","").strip()
-                if wa_cevap and self.wa_bot:
+                if not wa_cevap:
+                    wa_cevap = f"✅ [{kural['ad']}] Mail gönderildi."
+                if self.wa_bot:
                     def _wa_gonder(cevap=wa_cevap):
                         ok2 = self.wa_bot.wa_yanit_gonder(cevap)
                         if ok2:
-                            self._log(f"💬 WA yanıtı gönderildi: {cevap[:40]}…")
+                            self._log(f"💬 WA yanıtı: {cevap[:50]}")
                     import threading
                     threading.Thread(target=_wa_gonder, daemon=True).start()
             else:
