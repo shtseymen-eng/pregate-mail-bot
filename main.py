@@ -657,16 +657,16 @@ class WABot:
                 # Yöntem 1: Botun yazdığı yanıtlar her zaman bu öneklerle başlar.
                 # Gerçek kullanıcılar bu şekilde mesaj atmaz — en güvenilir filtre.
                 BOT_PREFIKSLERI = (
-                    "✅ Mail atıldı",
-                    "✅ Komutlar alındı",
-                    "❌ Uygunsuz mesaj",
-                    "ℹ️ Bu mesaj bugün",
-                    "❌ Komut okunmadı",
-                    "📧 WA erişim",
-                    "🧹 Grup sohbeti",
-                    "❌ Mail gönderilemedi",
+                    "✅ Mail atıldı", "Mail atıldı",
+                    "✅ Komutlar alındı", "Komutlar alındı",
+                    "❌ Uygunsuz mesaj", "Uygunsuz mesaj",
+                    "⚠️ Gönderilen metin", "Gönderilen metin mail",
+                    "ℹ️ Bu mesaj bugün", "Bu mesaj bugün",
+                    "❌ Komut okunmadı", "Komut okunmadı",
+                    "❌ Mail gönderilemedi", "Mail gönderilemedi",
                 )
-                if any(text.startswith(p) for p in BOT_PREFIKSLERI):
+                txt_strip = text.strip()
+                if any(txt_strip.startswith(p) for p in BOT_PREFIKSLERI):
                     continue
 
                 # Yöntem 2: Daha önce gönderilen yanıt metinleri seti
@@ -1766,17 +1766,15 @@ class App(ctk.CTk):
             # Ayarlarda özel mesaj varsa onu kullan, yoksa otomatik oluştur
             uygunsuz = cfg.get("uygunsuz_cevap", "").strip()
             if not uygunsuz:
-                # Config'deki kurallardan komut listesini dinamik oluştur
                 kural_listesi = []
                 for k in cfg.get("kurallar", []):
                     kw_str = ", ".join(k.get("keywords", []))
                     kural_listesi.append(f"• {k.get('ad','?')} → {kw_str}")
                 komutlar_str = "\n".join(kural_listesi) if kural_listesi else "• (Kural tanımlanmamış)"
                 uygunsuz = (
-                    "❌ Uygunsuz mesaj — mail atılamaz.\n\n"
-                    "Mail atılabilmesi için mesajınızda\n"
-                    "aşağıdaki departman komutlarından\n"
-                    "birinin bulunması gerekiyor:\n\n"
+                    "⚠️ Gönderilen metin mail atılabilir formatta değil.\n\n"
+                    "Mail gönderilebilmesi için mesajınızda\n"
+                    "departman komutu bulunmalıdır:\n\n"
                     f"{komutlar_str}"
                 )
             self._log(f"💬 [{gonderen_mail}]: eşleşme yok — komut hatası WA yanıtı gönderildi")
