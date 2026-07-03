@@ -730,20 +730,9 @@ class WABot:
                 if not text:
                     continue
 
-                # Anahtar kelime kontrolü
-                cfg_check = load_config()
-                metin_n = _norm(text)
-                eslesen_kw = False
-                for kural in cfg_check.get("kurallar",[]):
-                    for kw in kural.get("keywords",[]):
-                        if _norm(kw) in metin_n:
-                            eslesen_kw = True; break
-                    if eslesen_kw: break
-
-                if not eslesen_kw:
-                    self.on_log(f"💬 [{sender}]: eşleşme yok — {text[:40]}")
-                    continue
-
+                # Tüm mesajları biriktiriciye ekle.
+                # Keyword kontrolü _on_mesaj_bitti'de yapılır —
+                # eşleşme varsa mail, yoksa uygunsuz WA yanıtı gönderilir.
                 self.on_log(f"📩 [{sender}]: {text[:60]}"
                             + (f"  📎{len(img_paths)}" if img_paths else ""))
                 self._biriktiric.ekle(sender, text, img_paths)
