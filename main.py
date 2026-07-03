@@ -891,60 +891,93 @@ class WABot:
         except: pass
 
     def wa_yanit_gonder(self, metin):
-        """WhatsApp Web'deki açık gruba otomatik yanıt yazar ve gönderir.
-
-        Yöntem:
-        1. Metni Windows panosuna win32clipboard ile yaz (kesinlikle çalışır)
-        2. Input kutusuna Ctrl+A → Ctrl+V ile yapıştır (React state tetiklenir)
-        3. Gönder butonuna tıkla; bulunamazsa Enter ile gönder
-        """
+        """WhatsApp Web'deki açık gruba otomatik yanıt yazar ve gönderir."""
         if not metin or not self._driver:
             return False
         try:
             from selenium.webdriver.common.keys import Keys
+            import tempfile, subprocess, os as _os
 
-            # 1) Metni Windows panosuna yaz (JS clipboard'dan çok daha güvenilir)
+            # ── 1) Panoyu ayarla ────────────────────────────────────────────
+            # PowerShell temp-file yöntemi: özel karakter/Türkçe sorunsuz,
+            # izin gerektirmez, her Windows'ta çalışır.
+            _pano_ok = False
             try:
-                import win32clipboard
-                win32clipboard.OpenClipboard()
-                win32clipboard.EmptyClipboard()
-                win32clipboard.SetClipboardText(metin, win32clipboard.CF_UNICODETEXT)
-                win32clipboard.CloseClipboard()
+                with tempfile.NamedTemporaryFile(
+                        mode='w', encoding='utf-8-sig',
+                        suffix='.txt', delete=False) as _f:
+                    _f.write(metin); _tmp = _f.name
+                subprocess.run(
+                    ['powershell', '-NoProfile', '-Command',
+                     f'[System.IO.File]::ReadAllText("{_tmp}",'
+                     f'[System.Text.Encoding]::UTF8) | Set-Clipboard'],
+                    capture_output=True, timeout=5)
+                _os.unlink(_tmp)
+                _pano_ok = True
             except Exception:
-                # Fallback: JS clipboard (win32clipboard yoksa)
-                metin_js = metin.replace("\\", "\\\\").replace("`", "\\`")
-                self._driver.execute_script(
-                    f"navigator.clipboard.writeText(`{metin_js}`).catch(()=>{{}});"
-                )
+                pass
+
+            if not _pano_ok:
+                # Fallback: win32clipboard
+                try:
+                    import win32clipboard as _wc
+                    _wc.OpenClipboard(0)
+                    _wc.EmptyClipboard()
+                    _wc.SetClipboardText(metin, _wc.CF_UNICODETEXT)
+                    _wc.CloseClipboard()
+                    _pano_ok = True
+                except Exception:
+                    pass
+
+            if not _pano_ok:
+                self.on_log("⚠ Pano ayarlanamadı — WA yanıtı gönderilemedi")
+                return False
+
             time.sleep(0.2)
 
-            # 2) Mesaj giriş kutusunu bul
+            # ── 2) Compose kutusunu bul ──────────────────────────────────────
+            # Daha spesifik selectors — footer içindeki compose kutusu,
+            # arama kutusunu ASLA eşleştirmez
             selectors = [
+                'footer [data-testid="conversation-compose-box-input"]',
                 '[data-testid="conversation-compose-box-input"]',
-                'div[contenteditable="true"][data-tab="10"]',
-                'div[contenteditable="true"][aria-placeholder]',
                 'footer div[contenteditable="true"]',
+                'div[contenteditable="true"][data-tab="10"]',
             ]
             input_box = None
             for sel in selectors:
                 try:
                     input_box = WebDriverWait(self._driver, 5).until(
                         EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
-                    break
-                except: continue
+                    # Doğrulama: footer içinde mi?
+                    in_footer = self._driver.execute_script(
+                        "return arguments[0].closest('footer') !== null "
+                        "|| arguments[0].getAttribute('data-tab') === '10'",
+                        input_box)
+                    if in_footer:
+                        break
+                    input_box = None
+                except:
+                    continue
+
             if not input_box:
-                self.on_log("⚠ WA yanıt kutusu bulunamadı")
+                self.on_log("⚠ WA compose kutusu bulunamadı")
                 return False
 
-            # 3) Tıkla, varsa eski içeriği temizle, yapıştır
+            # ── 3) Kutuyu temizle ve yapıştır ───────────────────────────────
             input_box.click()
             time.sleep(0.3)
-            input_box.send_keys(Keys.CONTROL + 'a')   # hepsini seç
-            time.sleep(0.1)
-            input_box.send_keys(Keys.CONTROL + 'v')   # yapıştır
+            # Önce içeriği JS ile temizle, sonra Ctrl+V ile yapıştır
+            self._driver.execute_script(
+                "arguments[0].focus();"
+                "document.execCommand('selectAll', false, null);"
+                "document.execCommand('delete', false, null);",
+                input_box)
+            time.sleep(0.15)
+            input_box.send_keys(Keys.CONTROL + 'v')
             time.sleep(0.5)
 
-            # 4) Gönder butonuna tıkla
+            # ── 4) Gönder butonuna tıkla ─────────────────────────────────────
             send_selectors = [
                 '[data-testid="send"]',
                 '[data-testid="compose-btn-send"]',
@@ -960,9 +993,9 @@ class WABot:
                     btn.click()
                     sent = True
                     break
-                except: continue
+                except:
+                    continue
 
-            # 5) Gönder butonu bulunamazsa Enter dene
             if not sent:
                 input_box.send_keys(Keys.ENTER)
 
