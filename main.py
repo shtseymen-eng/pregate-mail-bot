@@ -568,11 +568,12 @@ class WABot:
             try:
                 self._mesajlari_oku()
                 dongu += 1
-                if dongu % 6 == 0:
-                    self.on_log(f"⏳ Aktif — {dongu*10}sn")
-                # Her ~5 dakikada bir sayfa hâlâ yanıt veriyor mu kontrol et
+                # Her ~5 dakikada bir sayfa sağlık kontrolü
                 if dongu % 30 == 0:
                     self._saglik_kontrol()
+                # Her ~1 dakikada bir gece yarısı temizlik kontrolü
+                if dongu % 6 == 0:
+                    self._gece_yarisi_kontrol()
             except WebDriverException as e:
                 if "chrome not reachable" in str(e).lower() or \
                    "disconnected" in str(e).lower() or \
@@ -721,6 +722,128 @@ class WABot:
 
         except Exception as e:
             raise e
+
+    def _gece_yarisi_kontrol(self):
+        """Her dakika çağrılır. Saat 00:00–00:01 arasında sohbeti temizler.
+        Aynı gün içinde birden fazla temizlik yapılmaması için tarih takibi yapar."""
+        now = datetime.now()
+        bugun = now.strftime("%Y-%m-%d")
+        # Sadece 00:00–00:01 arasında ve bugün henüz temizlemediyse
+        if now.hour == 0 and now.minute == 0:
+            if getattr(self, "_son_temizlik_tarihi", "") != bugun:
+                self._son_temizlik_tarihi = bugun
+                self.on_log("🌙 Gece yarısı — grup sohbeti temizleniyor…")
+                self._sohbeti_temizle()
+
+    def _sohbeti_temizle(self):
+        """WhatsApp Web'de açık olan grup sohbetini 'Sohbeti Temizle' menüsü
+        aracılığıyla yalnızca bu cihazdan siler (karşı tarafa görünmez)."""
+        try:
+            from selenium.webdriver.common.keys import Keys
+
+            # 1) Grup başlığına tıkla (menüyü açmak için)
+            baslik_selectors = [
+                '[data-testid="conversation-info-header"]',
+                'header [data-testid="conversation-info-header-chat-title"]',
+                'header span[title]',
+            ]
+            baslik_el = None
+            for sel in baslik_selectors:
+                try:
+                    baslik_el = WebDriverWait(self._driver, 4).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    break
+                except: continue
+
+            # 2) Üç nokta menüsünü aç
+            menu_selectors = [
+                '[data-testid="menu"]',
+                '[data-testid="conversation-menu"]',
+                'div[title="Menü"]',
+                'span[data-testid="menu"]',
+            ]
+            menu_el = None
+            for sel in menu_selectors:
+                try:
+                    menu_el = WebDriverWait(self._driver, 4).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    menu_el.click()
+                    time.sleep(0.5)
+                    break
+                except: continue
+
+            if not menu_el:
+                self.on_log("⚠ Menü butonu bulunamadı — sohbet temizlenemedi")
+                return
+
+            # 3) 'Sohbeti Temizle' seçeneğini bul ve tıkla
+            temizle_selectors = [
+                '[aria-label="Sohbeti temizle"]',
+                '[aria-label="Clear chat"]',
+            ]
+            temizle_el = None
+            for sel in temizle_selectors:
+                try:
+                    temizle_el = WebDriverWait(self._driver, 4).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    temizle_el.click()
+                    time.sleep(0.5)
+                    break
+                except: continue
+
+            if not temizle_el:
+                # Metin ile ara
+                try:
+                    items = self._driver.find_elements(
+                        By.CSS_SELECTOR, '[role="menuitem"], li[data-animate-dropdown-item]')
+                    for item in items:
+                        if "temizle" in (item.text or "").lower() or \
+                           "clear" in (item.text or "").lower():
+                            item.click()
+                            time.sleep(0.5)
+                            temizle_el = item
+                            break
+                except: pass
+
+            if not temizle_el:
+                self.on_log("⚠ 'Sohbeti Temizle' seçeneği bulunamadı")
+                return
+
+            # 4) Onay diyaloğunu onayla
+            onay_selectors = [
+                '[data-testid="confirm-btn"]',
+                'div[role="button"][aria-label*="Temizle"]',
+                'div[role="button"][aria-label*="Clear"]',
+            ]
+            for sel in onay_selectors:
+                try:
+                    onay = WebDriverWait(self._driver, 4).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    onay.click()
+                    time.sleep(1)
+                    break
+                except: continue
+
+            # 5) "Mesajları sil" onayı (bazen iki adımlı)
+            try:
+                sil_selectors = [
+                    'button[aria-label*="Sil"]',
+                    'div[role="button"][aria-label*="Sil"]',
+                ]
+                for sel in sil_selectors:
+                    try:
+                        sil = WebDriverWait(self._driver, 3).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                        sil.click()
+                        time.sleep(1)
+                        break
+                    except: continue
+            except: pass
+
+            self.on_log("🧹 Grup sohbeti temizlendi (sadece bu cihazda).")
+
+        except Exception as e:
+            self.on_log(f"⚠ Sohbet temizleme hatası: {str(e)[:80]}")
 
     def _saglik_kontrol(self):
         """Sayfa hâlâ yanıt veriyor mu ve sohbet listesi görünür mü kontrol et.
