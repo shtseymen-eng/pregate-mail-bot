@@ -948,32 +948,29 @@ class WABot:
             time.sleep(0.2)
 
             # ── 2) Compose kutusunu bul ──────────────────────────────────────
-            # Daha spesifik selectors — footer içindeki compose kutusu,
-            # arama kutusunu ASLA eşleştirmez
             selectors = [
-                'footer [data-testid="conversation-compose-box-input"]',
                 '[data-testid="conversation-compose-box-input"]',
-                'footer div[contenteditable="true"]',
                 'div[contenteditable="true"][data-tab="10"]',
+                'footer div[contenteditable="true"]',
+                'div[contenteditable="true"][aria-placeholder]',
+                'div[role="textbox"][contenteditable="true"]',
             ]
             input_box = None
             for sel in selectors:
                 try:
-                    input_box = WebDriverWait(self._driver, 5).until(
+                    el = WebDriverWait(self._driver, 4).until(
                         EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
-                    # Doğrulama: footer içinde mi?
-                    in_footer = self._driver.execute_script(
-                        "return arguments[0].closest('footer') !== null "
-                        "|| arguments[0].getAttribute('data-tab') === '10'",
-                        input_box)
-                    if in_footer:
-                        break
-                    input_box = None
-                except:
-                    continue
+                    # Arama kutusu değil mi kontrol et
+                    tag = el.get_attribute("data-tab") or ""
+                    aria = el.get_attribute("aria-label") or ""
+                    if "ara" in aria.lower() or "search" in aria.lower():
+                        continue  # arama kutusunu atla
+                    input_box = el
+                    break
+                except: continue
 
             if not input_box:
-                self.on_log("⚠ WA compose kutusu bulunamadı")
+                self.on_log("⚠ WA compose kutusu bulunamadı — yanıt gönderilemedi")
                 return False
 
             # ── 3) Kutuyu temizle ve yapıştır ───────────────────────────────
