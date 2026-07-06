@@ -82,8 +82,11 @@ def turkce_norm(s):
 _BOT_PREFIKSLERI = (
     "✅ Mail atıldı", "Mail atıldı",
     "Komutlar alınmadı", "⚠️ Komutlar alınmadı",
+    "❌ Bu mesaj", "Bu mesaj içeriği",
     "ℹ️ Bu mesaj bugün", "Bu mesaj bugün",
     "❌ Mail gönderilemedi", "Mail gönderilemedi",
+    "❌ Uygunsuz", "Uygunsuz mesaj",
+    "❌ Komut", "Komut okunmadı",
 )
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -433,7 +436,7 @@ class WABot:
         self._driver          = None
         self._manuel_durdurma = False  # True ise otomatik restart yapılmaz
         self._baglanti_hata_say = 0    # ard arda bağlantı hata sayacı
-        self._son_yanit_metinleri = set()  # botun WA'ya yazdığı yanıtlar
+        self._son_yanit_metinleri = {}  # ilk_40_char → True (botun gönderdiği yanıtlar)
         # Restart sonrasında eski mesajları tekrar işlememek için
         # seen listesi DB'den yükleniyor (48 saatlik hafıza)
         self._seen       = db_seen_yukle()
@@ -721,11 +724,22 @@ class WABot:
 
                 # ── Botun kendi mesajlarını kesinlikle işleme ───────────────
                 txt_strip = text.strip()
-                # Prefix kontrolü: botun her yanıtı bu kalıplarla başlar
+                txt_ilk40 = txt_strip[:40]
+
+                # 1) Sabit prefix listesi
                 if any(txt_strip.startswith(p) for p in _BOT_PREFIKSLERI):
                     continue
-                # Son gönderilen yanıtlar seti
-                if txt_strip in self._son_yanit_metinleri:
+
+                # 2) Gönderilen yanıt imzaları (ilk 40 char eşleşmesi)
+                if txt_ilk40 in self._son_yanit_metinleri:
+                    continue
+                # Ters eşleşme: kayıtlı imza gelen metnin içinde mi?
+                if any(txt_strip.startswith(k) for k in self._son_yanit_metinleri):
+                    continue
+
+                # 3) Config'deki özel uygunsuz_cevap metni (runtime'da okunur)
+                _uyg = load_config().get("uygunsuz_cevap","").strip()
+                if _uyg and txt_strip.startswith(_uyg[:40]):
                     continue
 
                 self.on_log(f"📩 [{sender}]: {text[:60]}"
@@ -1008,12 +1022,16 @@ class WABot:
             if not sent:
                 input_box.send_keys(Keys.ENTER)
 
-            time.sleep(0.5)
-            # Gönderilen metni hafızaya al — geri okunmasını engelle
-            self._son_yanit_metinleri.add(metin.strip())
-            # Seti 50 kayıtla sınırla
-            if len(self._son_yanit_metinleri) > 50:
-                self._son_yanit_metinleri.pop()
+            # Gönderilen yanıtı tanımlayıcı imzayla kaydet
+            # (ilk 40 karakter — WA satır sonu farkları olsa bile tutar)
+            imza = metin.strip()[:40]
+            self._son_yanit_metinleri[imza] = time.time()
+            # 2 saatten eski imzaları temizle
+            now_t = time.time()
+            self._son_yanit_metinleri = {
+                k: v for k, v in self._son_yanit_metinleri.items()
+                if now_t - v < 7200
+            }
             return True
 
         except Exception as e:
