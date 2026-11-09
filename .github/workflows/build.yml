@@ -1,10 +1,8 @@
 name: Windows Kurulum Paketi
-
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
-
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: windows-latest
@@ -13,19 +11,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Bagimliliklar
+      - name: Dependencies
         run: pip install customtkinter selenium pyinstaller pywin32 pillow webdriver-manager
-      - name: Ikon olustur
-        run: python make_ico.py
-      - name: PyInstaller
-        run: pyinstaller wa_mail_bot.spec
-      - name: Inno Setup kur
-        run: choco install innosetup --yes
-      - name: Setup olustur
-        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss'
-      - name: Artifact yukle
-        uses: actions/upload-artifact@v4
+      - name: Build executable
+        run: |
+          python make_ico.py
+          pyinstaller --clean --noconfirm wa_mail_bot.spec
+          Copy-Item config.template.json dist/PregateMail/config.json
+          Copy-Item splash.png,icon.png,DOWNLOAD-README.txt dist/PregateMail/
+      - name: Offline packaged GUI smoke test
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'mail-smoke.txt'
+          $process = Start-Process dist/PregateMail/PregateMail.exe -ArgumentList '--self-test', $result -PassThru
+          if (-not $process.WaitForExit(60000)) { $process.Kill(); throw 'Smoke test timed out' }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $result)) { throw 'Smoke test failed' }
+          Get-Content $result
+          Remove-Item dist/PregateMail/kayitlar.db -ErrorAction SilentlyContinue
+          Remove-Item dist/PregateMail/chrome_profile -Recurse -Force -ErrorAction SilentlyContinue
+      - name: Build installer and portable archive
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer failed' }
+          Compress-Archive -Path dist/PregateMail/* -DestinationPath installer_output/PregateMail-Windows-x64.zip
+          Copy-Item DOWNLOAD-README.txt installer_output/
+          Get-ChildItem installer_output -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content installer_output/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
         with:
-          name: PregateMail_Kurulum
-          path: installer_output\PregateMail_Kurulum.exe
-          retention-days: 60
+          name: PregateMail-Windows-x64
+          path: installer_output/*
+      - name: Publish verified downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view v1.0.2 --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Expected existing v1.0.2 release' }
+          gh release upload v1.0.2 installer_output/* --clobber --repo $env:GITHUB_REPOSITORY

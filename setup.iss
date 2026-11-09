@@ -1,8 +1,8 @@
 [Setup]
 AppName=Pregate Kayıt Red Mail Botu
-AppVersion=1.23
+AppVersion=1.0.2
 AppPublisher=Poliport
-DefaultDirName={autopf}\PregateMail
+DefaultDirName={localappdata}\Programs\PregateMail
 DefaultGroupName=Pregate Mail Botu
 OutputBaseFilename=PregateMail_Kurulum
 Compression=lzma

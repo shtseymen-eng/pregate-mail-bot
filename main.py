@@ -1852,6 +1852,18 @@ class App(ctk.CTk):
         self.destroy()
 
 
+if __name__=="__main__" and "--self-test" in sys.argv:
+    # Offline packaging check: never create a browser or connect to Outlook.
+    assert PIL_OK and OUTLOOK_OK and SELENIUM_OK
+    assert turkce_norm("KİMYA") == "kimya"
+    app = App()
+    app.update()
+    assert app.wa_bot is None and not app.running
+    app.destroy()
+    with open(sys.argv[sys.argv.index("--self-test") + 1], "w", encoding="utf-8") as result:
+        result.write("OK: packaged dependencies, GUI, SQLite; no bot started")
+    sys.exit(0)
+
 if __name__=="__main__":
     # App doğrudan başlar — tek mainloop, siyah pencere sorunu yok.
     # Splash ayrı bir tk.Tk() kökü içinde açılmıyor; App'in kendi

@@ -1,10 +1,12 @@
+from PyInstaller.utils.hooks import collect_all
+selenium_datas, selenium_binaries, selenium_hidden = collect_all('selenium')
 # -*- mode: python ; coding: utf-8 -*-
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[('config.json', '.'), ('splash.png', '.'), ('icon.png', '.')],
-    hiddenimports=[
+    binaries=selenium_binaries,
+    datas=selenium_datas + [('splash.png', '.'), ('icon.png', '.')],
+    hiddenimports=selenium_hidden + [
         'customtkinter',
         'selenium', 'selenium.webdriver', 'selenium.webdriver.chrome',
         'selenium.webdriver.chrome.options', 'selenium.webdriver.chrome.service',
@@ -15,7 +17,6 @@ a = Analysis(
         'win32com', 'win32com.client', 'pywintypes',
         'sqlite3', 'PIL', 'PIL.Image', 'PIL.ImageTk',
     ],
-    collect_all=['selenium'],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],
