@@ -40,6 +40,11 @@ class CommandQueue:
                 SELECT ?, ?, 'pending' FROM mail_switch WHERE active=1 AND since<=?
             """, (chat, message, timestamp)).rowcount == 1
 
+    def cancel(self, chat, message):
+        with self.lock, closing(sqlite3.connect(self.path)) as db, db:
+            db.execute("UPDATE mail_command SET state='cancelled' WHERE chat=? AND message=? AND state='pending'",
+                       (chat, message))
+
     def submit(self, chat, message, deliver):
         with self.lock, closing(sqlite3.connect(self.path)) as db:
             with db:

@@ -25,6 +25,24 @@ return [...document.querySelectorAll('#main [data-id]')].map(row => {
 """
 
 
+COMMON = {"?": "Komutları göster", "durum": "Gönderim durumunu göster"}
+STAFF = {"kontrol": "Bekleyen kaydı göster", "gönder": "Bekleyen kaydı şimdi gönder", "iptal": "Bekleyen kaydı iptal et", "son": "Son işlem sonucunu göster", "gruplar": "Departmanları listele"}
+ADMIN = {"start": "Gönderimi başlat", "stop": "Gönderimi durdur", "deneme": "Test adresine gönder"}
+
+
+def command_list(cfg, private):
+    commands = dict(COMMON, **STAFF)
+    if private:
+        commands.update(ADMIN)
+    else:
+        for rule in cfg.get("kurallar", []):
+            for word in rule.get("keywords", []):
+                name = word.strip().lstrip("!").casefold()
+                if name and name not in ADMIN:
+                    commands.setdefault(name, rule.get("ad", "") + " grubuna gönder")
+    return commands
+
+
 class Monitor:
     def __init__(self, config, db, profile, deliver, log, status):
         self.config, self.profile, self.deliver = config, profile, deliver
@@ -34,6 +52,8 @@ class Monitor:
         with closing(sqlite3.connect(db)) as conn:
             self.active = bool(conn.execute("SELECT active FROM mail_switch").fetchone()[0])
         self.pending, self.photos, self.seen = {}, {}, set()
+        self.last = {}
+        self.targets = {}
         self.initialized = set()
         self.lock = threading.RLock()
         self.closed = threading.Event()
@@ -70,7 +90,7 @@ class Monitor:
                     for target in [cfg.get("wa_group_name", "")] + admins:
                         if target and self.open_chat(driver, target):
                             self.scan(driver, target, target in admins, cfg)
-                    self.flush()
+                    self.flush(driver)
             except Exception as error:
                 self.log("WhatsApp bağlantısı yeniden kurulacak: " + type(error).__name__)
             finally:
@@ -122,24 +142,61 @@ class Monitor:
                     if not chat.endswith("@g.us") or len(parts) < 4:
                         continue
                     sender = parts[-1]
-                token, _, description = body.strip().partition(" ")
-                token = token.casefold()
-                if private and token in ("!start", "!stop", "!durum") and not description:
-                    if token != "!durum":
-                        self.switch(token == "!start")
-                    editor = driver.find_elements(By.CSS_SELECTOR, "#main footer [contenteditable=true]")
-                    if editor:
-                        editor[-1].send_keys("Mail gönderimi " + ("aktif" if self.active else "durduruldu"), Keys.ENTER)
+                self.targets[chat] = target
+                prefix = cfg.get("command_prefix") or "!"
+                key = chat, sender
+                def reply(message):
+                    self.reply(driver, message)
+                token, _, description = " ".join(body.split()).partition(" ")
+                command = token.startswith(prefix)
+                token = token[len(prefix):].casefold() if command else ""
+                allowed = command_list(cfg, private)
+                if command and token not in allowed:
+                    reply("Komut tanınmadı veya yetkiniz yok. Liste için " + prefix + "? yazın.")
+                    continue
+                if command:
+                    reply("Komut alındı.")
+                if command and token == "?":
+                    reply(" | ".join(prefix + k + " — " + v for k, v in allowed.items()))
+                    continue
+                if command and token in ("start", "stop", "durum"):
+                    if token != "durum":
+                        self.switch(token == "start")
+                    reply("Mail gönderimi " + ("aktif." if self.active else "durduruldu."))
+                    continue
+                if command and token == "gruplar":
+                    reply("Gruplar: " + (", ".join(r["ad"] for r in cfg.get("kurallar", [])) or "Tanımlı grup yok."))
+                    continue
+                if command and token == "son":
+                    reply(self.last.get(key, "Bu oturumda tamamlanan işleminiz yok."))
+                    continue
+                if command and token in ("kontrol", "gönder", "iptal"):
+                    ident = next((i for i in reversed(self.pending) if self.pending[i][0] == key), None)
+                    if not ident:
+                        reply("Bekleyen kaydınız yok.")
+                    else:
+                        row = self.pending[ident]
+                        if token == "kontrol":
+                            reply(f"{row[2][0]} • {len(row[4])} fotoğraf • {row[3]}")
+                        elif token == "gönder":
+                            row[1] = 0
+                        else:
+                            del self.pending[ident]
+                            self.queue.cancel(*ident)
+                            self.last[key] = "Kayıt iptal edildi."
+                            reply(self.last[key])
                     continue
                 if not self.active:
+                    if command:
+                        reply("Gönderim durduruldu.")
                     continue
                 now = time.time()
                 window = max(1, int(cfg.get("bekleme_dk", 2))) * 60
                 key = chat, sender
                 groups = [k for k in cfg.get("kurallar", []) if token in
-                          {"!" + word.strip().lstrip("!").casefold() for word in k.get("keywords", [])}]
+                          {word.strip().lstrip("!").casefold() for word in k.get("keywords", [])}]
                 group = None
-                if private and token == "!deneme":
+                if private and token == "deneme":
                     group = ("DENEME", [cfg.get("test_email", "")])
                 elif not private and len(groups) == 1:
                     group = (groups[0]["ad"], groups[0]["mail_list"])
@@ -147,6 +204,9 @@ class Monitor:
                     if self.queue.admit(chat, mid, now):
                         self.pending[(chat, mid)] = [key, now + window, group, description.strip(),
                             [p for when, p in self.photos.pop(key, []) if now - when <= window]]
+                        reply(group[0] + " kaydı alındı. Fotoğraflar bekleniyor.")
+                elif command:
+                    reply("Kayıt açılamadı. Açıklamayı ve departman alıcılarını kontrol edin.")
                 if urls:
                     latest = next((v for v in reversed(list(self.pending.values()))
                                    if v[0] == key and v[1] >= now), None)
@@ -164,20 +224,34 @@ class Monitor:
                                 self.photos.setdefault(key, []).append((now, encoded))
                 self.photos[key] = [(t,p) for t,p in self.photos.get(key,[]) if now-t<=window]
 
-    def flush(self):
+    def reply(self, driver, message):
+        editors = driver.find_elements(By.CSS_SELECTOR, "#main footer [contenteditable=true]")
+        if editors:
+            editors[-1].send_keys(message, Keys.ENTER)
+
+    def flush(self, driver):
         with self.lock:
             for identity, row in list(self.pending.items()):
                 _, deadline, (group, recipients), body, photos = row
                 if time.time() < deadline:
                     continue
                 del self.pending[identity]
-                with tempfile.TemporaryDirectory() as folder:
-                    paths = []
-                    for n, photo in enumerate(photos, 1):
-                        header, data = photo.split(",", 1)
-                        ext = {"image/png":"png", "image/webp":"webp"}.get(header[5:].split(";")[0], "jpg")
-                        path = Path(folder) / f"Kontrol_Fotografi_{n:02}.{ext}"
-                        path.write_bytes(base64.b64decode(data))
-                        paths.append(str(path))
-                    ok = self.queue.submit(*identity, lambda: self.deliver(recipients, group, body, paths))
-                    self.log(group + (" • Outlook'a teslim edildi" if ok else " • Gönderim kontrol edilmeli"))
+                try:
+                    with tempfile.TemporaryDirectory() as folder:
+                        paths = []
+                        for n, photo in enumerate(photos, 1):
+                            header, data = photo.split(",", 1)
+                            ext = {"image/png":"png", "image/webp":"webp"}.get(header[5:].split(";")[0], "jpg")
+                            path = Path(folder) / f"Kontrol_Fotografi_{n:02}.{ext}"
+                            path.write_bytes(base64.b64decode(data))
+                            paths.append(str(path))
+                        ok = self.queue.submit(*identity, lambda: self.deliver(recipients, group, body, paths))
+                except Exception as error:
+                    ok = False
+                    self.log("Gönderim kontrol edilmeli: " + type(error).__name__)
+                result = (f"Mail atıldı. {group} • {len(photos)} fotoğraf." if ok
+                          else f"{group} • Gönderim doğrulanamadı. Outlook'u kontrol edin.")
+                self.last[row[0]] = result
+                self.log(result)
+                if self.open_chat(driver, self.targets[identity[0]]):
+                    self.reply(driver, result)
