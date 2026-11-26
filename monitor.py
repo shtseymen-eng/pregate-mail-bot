@@ -154,6 +154,8 @@ class Monitor:
                 if command and token not in allowed:
                     reply("Komut tanınmadı veya yetkiniz yok. Liste için " + prefix + "? yazın.")
                     continue
+                if command:
+                    reply("Komut alındı.")
                 if command and token == "?":
                     reply(" | ".join(prefix + k + " — " + v for k, v in allowed.items()))
                     continue
@@ -234,17 +236,22 @@ class Monitor:
                 if time.time() < deadline:
                     continue
                 del self.pending[identity]
-                with tempfile.TemporaryDirectory() as folder:
-                    paths = []
-                    for n, photo in enumerate(photos, 1):
-                        header, data = photo.split(",", 1)
-                        ext = {"image/png":"png", "image/webp":"webp"}.get(header[5:].split(";")[0], "jpg")
-                        path = Path(folder) / f"Kontrol_Fotografi_{n:02}.{ext}"
-                        path.write_bytes(base64.b64decode(data))
-                        paths.append(str(path))
-                    ok = self.queue.submit(*identity, lambda: self.deliver(recipients, group, body, paths))
-                    result = group + (" • Outlook'a teslim edildi" if ok else " • Gönderim kontrol edilmeli")
-                    self.last[row[0]] = result
-                    self.log(result)
-                    if self.open_chat(driver, self.targets[identity[0]]):
-                        self.reply(driver, result)
+                try:
+                    with tempfile.TemporaryDirectory() as folder:
+                        paths = []
+                        for n, photo in enumerate(photos, 1):
+                            header, data = photo.split(",", 1)
+                            ext = {"image/png":"png", "image/webp":"webp"}.get(header[5:].split(";")[0], "jpg")
+                            path = Path(folder) / f"Kontrol_Fotografi_{n:02}.{ext}"
+                            path.write_bytes(base64.b64decode(data))
+                            paths.append(str(path))
+                        ok = self.queue.submit(*identity, lambda: self.deliver(recipients, group, body, paths))
+                except Exception as error:
+                    ok = False
+                    self.log("Gönderim kontrol edilmeli: " + type(error).__name__)
+                result = (f"Mail atıldı. {group} • {len(photos)} fotoğraf." if ok
+                          else f"{group} • Gönderim doğrulanamadı. Outlook'u kontrol edin.")
+                self.last[row[0]] = result
+                self.log(result)
+                if self.open_chat(driver, self.targets[identity[0]]):
+                    self.reply(driver, result)
