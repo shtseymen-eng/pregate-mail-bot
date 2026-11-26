@@ -1119,7 +1119,7 @@ class MailOnizleme(ctk.CTkToplevel):
     def __init__(self, master, kural_ad, mail_list, keywords):
         super().__init__(master)
         self.title(f"Mail Önizleme – {kural_ad}")
-        self.geometry("620x520")
+        fit_window(self, 600, 470)
         self.configure(fg_color=RENK_ANA_ARKA)
         self.grab_set()
         cfg      = load_config()
@@ -1165,11 +1165,19 @@ class MailOnizleme(ctk.CTkToplevel):
 # ══════════════════════════════════════════════════════════════════════════════
 # AYARLAR
 # ══════════════════════════════════════════════════════════════════════════════
+def fit_window(window, width, height):
+    scale = window._get_window_scaling()
+    usable_width = max(1, int((window.winfo_screenwidth() - 40) / scale))
+    usable_height = max(1, int((window.winfo_screenheight() - 100) / scale))
+    window.geometry(f"{min(width, usable_width)}x{min(height, usable_height)}")
+    window.minsize(min(560, usable_width), min(360, usable_height))
+
+
 class AyarlarPencere(ctk.CTkToplevel):
     def __init__(self, master):
         super().__init__(master)
-        self.title("Ayarlar"); self.geometry("780x680")
-        self.minsize(700,580); self.configure(fg_color=RENK_ANA_ARKA)
+        self.title("Ayarlar"); fit_window(self, 740, 570)
+        self.configure(fg_color=RENK_ANA_ARKA)
         self.grab_set(); self._kart_list = []; self._build()
 
     def _build(self):
@@ -1199,13 +1207,15 @@ class AyarlarPencere(ctk.CTkToplevel):
         self.admin_numbers = ctk.CTkEntry(panel, width=360)
         self.admin_numbers.insert(0, ", ".join(cfg.get("admins", [])))
         self.admin_numbers.pack()
-        self._build_wa(self.tab.tab("📱  WhatsApp"))
+        wa_panel = ctk.CTkScrollableFrame(self.tab.tab("📱  WhatsApp"))
+        wa_panel.pack(fill="both", expand=True)
+        self._build_wa(wa_panel)
         self._build_kurallar(self.tab.tab("🔑  Kurallar"))
         self._build_outlook(self.tab.tab("✉   Outlook"))
         ctk.CTkButton(self, text="💾  Kaydet & Kapat",
                       fg_color=RENK_YESIL, hover_color="#17a844",
                       font=("Segoe UI",13,"bold"), height=42,
-                      command=self._kaydet).pack(fill="x", padx=14, pady=(4,14))
+                      command=self._kaydet).pack(side="bottom", before=self.tab, fill="x", padx=14, pady=(4,8))
 
     def _build_wa(self, parent):
         parent.configure(fg_color=RENK_PANEL)
@@ -1493,7 +1503,7 @@ class AyarlarPencere(ctk.CTkToplevel):
 class RaporPencere(ctk.CTkToplevel):
     def __init__(self,master):
         super().__init__(master)
-        self.title("Aylık Rapor"); self.geometry("820x580")
+        self.title("Aylık Rapor"); fit_window(self, 780, 530)
         self.configure(fg_color=RENK_ANA_ARKA); self.grab_set()
         self._build(); self._goster(datetime.now().year,datetime.now().month)
 
@@ -1612,7 +1622,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Pregate Kayıt Red – WA Mail Botu  |  Poliport")
-        self.geometry("900x640"); self.minsize(800,540)
+        fit_window(self, 820, 550)
         self.configure(fg_color=RENK_ANA_ARKA)
         self.state("normal")
         self.deiconify()
