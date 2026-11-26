@@ -1197,6 +1197,20 @@ class AyarlarPencere(ctk.CTkToplevel):
         self.tab.add("🔑  Kurallar")
         self.tab.add("✉   Outlook")
         self.tab.add("Yönetim")
+        from monitor import command_list
+        self.tab.add("Komutlar")
+        commands = ctk.CTkScrollableFrame(self.tab.tab("Komutlar"))
+        commands.pack(fill="both", expand=True)
+        cfg = load_config()
+        prefix = cfg.get("command_prefix") or "!"
+        ctk.CTkLabel(commands, text="Komut ön eki").pack(anchor="w")
+        self.command_prefix = ctk.CTkEntry(commands, width=80)
+        self.command_prefix.insert(0, prefix)
+        self.command_prefix.pack(anchor="w")
+        for private, title in [(False, "Personel • Red grubu"), (True, "Admin • Özel mesaj")]:
+            ctk.CTkLabel(commands, text=title, font=("Segoe UI", 14, "bold")).pack(anchor="w")
+            for name, desc in command_list(cfg, private).items():
+                ctk.CTkLabel(commands, text=prefix + name + "   " + desc).pack(anchor="w")
         panel = self.tab.tab("Yönetim")
         cfg = load_config()
         ctk.CTkLabel(panel, text="Deneme mail adresi").pack()
@@ -1476,6 +1490,12 @@ class AyarlarPencere(ctk.CTkToplevel):
 
     def _kaydet(self):
         cfg=load_config()
+        prefix = self.command_prefix.get().strip()
+        if len(prefix) != 1 or prefix.isalnum() or prefix.isspace():
+            from tkinter import messagebox
+            messagebox.showerror("Komut ön eki", "Ünlem gibi tek bir işaret girin.", parent=self)
+            return
+        cfg["command_prefix"] = prefix
         cfg["admins"] = [x.strip() for x in self.admin_numbers.get().split(",") if x.strip()]
         cfg["test_email"] = self.test_address.get().strip()
         cfg["wa_group_name"] = self.ent_grup.get().strip()
