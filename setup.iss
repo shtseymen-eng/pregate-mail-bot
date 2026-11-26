@@ -1,6 +1,6 @@
 [Setup]
 AppName=Pregate Kayıt Red Mail Botu
-AppVersion=1.0.2
+AppVersion=1.1.0
 AppPublisher=Poliport
 DefaultDirName={localappdata}\Programs\PregateMail
 DefaultGroupName=Pregate Mail Botu
