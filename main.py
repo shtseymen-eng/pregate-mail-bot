@@ -207,28 +207,22 @@ def outlook_hesaplari():
         return [a.SmtpAddress for a in ol.GetNamespace("MAPI").Accounts]
     except: return []
 
-MAIL_SABLON = """\
-Sayın İlgili,
+MAIL_SABLON = """Merhaba,
 
-Aşağıda bilgileri paylaşılan araç, {tarih} tarihinde kapı girişinde \
-kayıt yapılmamış olup sisteme RED olarak işlenmiştir.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Gönderen  : {gonderen}
-Grup      : {grup}
-Tarih     : {tarih}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Mesaj İçeriği:
 {mesaj}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Bu araç kapı giriş kaydı yapılmamış olduğundan \
-ilgili birimler tarafından gerekli işlemlerin yapılması gerekmektedir.
+Bilgilerinize sunarız.
+Pregate Araç Kayıt ve Kontrol"""
 
-Saygılarımızla,
-Pregate Araç Kontrol Sistemi
-"""
+def select_sender(outlook, mail, address):
+    if not address:
+        return
+    for account in outlook.GetNamespace("MAPI").Accounts:
+        if (account.SmtpAddress or "").strip().casefold() == address.strip().casefold():
+            mail.SendUsingAccount = account
+            return
+    raise ValueError("Seçilen gönderici hesabı Outlook'ta bulunamadı.")
+
 
 def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi, img_paths=None):
     if not OUTLOOK_OK: return False, "pywin32 yüklü değil"
@@ -249,14 +243,8 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi, img_
             if img_paths:
                 for p in img_paths:
                     if p and os.path.exists(p):
-                        try: mail.Attachments.Add(p)
-                        except: pass
-            if from_account:
-                try:
-                    for acc in ol.GetNamespace("MAPI").Accounts:
-                        if acc.SmtpAddress.lower() == from_account.lower():
-                            mail.SendUsingAccount = acc; break
-                except: pass
+                        mail.Attachments.Add(p)
+            select_sender(ol, mail, from_account)
             mail.Send()
             sonuc[0] = True; sonuc[1] = "OK"
         except Exception as e:
@@ -267,7 +255,7 @@ def send_mail(mail_list, kural_ad, gonderen, mesaj, from_account, grup_adi, img_
                 pythoncom.CoUninitialize()
             except: pass
     t = threading.Thread(target=_gonder)
-    t.start(); t.join(timeout=30)
+    t.start(); t.join()
     return sonuc[0], sonuc[1]
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1079,10 +1067,7 @@ class WABot:
                     mail.Subject = f"[UYARI] WhatsApp Web'e Erişilemiyor – {tarih}"
                     mail.Body    = sablon
                     mail.To      = "; ".join(tum_mailler)
-                    if from_acc:
-                        for acc in ol.GetNamespace("MAPI").Accounts:
-                            if acc.SmtpAddress.lower() == from_acc.lower():
-                                mail.SendUsingAccount = acc; break
+                    select_sender(ol, mail, from_acc)
                     mail.Send()
                     self.on_log(f"📧 WA erişim uyarısı maili gönderildi → {', '.join(tum_mailler[:2])}")
                 except Exception as ex:
@@ -1203,6 +1188,17 @@ class AyarlarPencere(ctk.CTkToplevel):
         self.tab.add("📱  WhatsApp")
         self.tab.add("🔑  Kurallar")
         self.tab.add("✉   Outlook")
+        self.tab.add("Yönetim")
+        panel = self.tab.tab("Yönetim")
+        cfg = load_config()
+        ctk.CTkLabel(panel, text="Deneme mail adresi").pack()
+        self.test_address = ctk.CTkEntry(panel, width=360)
+        self.test_address.insert(0, cfg.get("test_email", "sseymen@poliport.com"))
+        self.test_address.pack()
+        ctk.CTkLabel(panel, text="Admin numaraları (uluslararası biçimde, virgülle ayırın)").pack()
+        self.admin_numbers = ctk.CTkEntry(panel, width=360)
+        self.admin_numbers.insert(0, ", ".join(cfg.get("admins", [])))
+        self.admin_numbers.pack()
         self._build_wa(self.tab.tab("📱  WhatsApp"))
         self._build_kurallar(self.tab.tab("🔑  Kurallar"))
         self._build_outlook(self.tab.tab("✉   Outlook"))
@@ -1470,6 +1466,8 @@ class AyarlarPencere(ctk.CTkToplevel):
 
     def _kaydet(self):
         cfg=load_config()
+        cfg["admins"] = [x.strip() for x in self.admin_numbers.get().split(",") if x.strip()]
+        cfg["test_email"] = self.test_address.get().strip()
         cfg["wa_group_name"] = self.ent_grup.get().strip()
         try: cfg["bekleme_dk"] = max(1,int(self.ent_sure.get().strip()))
         except: cfg["bekleme_dk"] = 2
@@ -1700,29 +1698,40 @@ class App(ctk.CTk):
         self.txt_log.grid(row=1,column=0,sticky="nsew",padx=14,pady=(0,14))
 
     def _baslat(self):
-        cfg=load_config()
-        if not cfg.get("wa_group_name","").strip():
-            messagebox.showwarning("Uyarı","Ayarlar → WhatsApp'tan grup adını girin!")
+        if self.wa_bot:
+            self.wa_bot.switch(True)
             return
-        if not cfg.get("kurallar"):
-            messagebox.showwarning("Uyarı","Ayarlar → Kurallar'dan en az bir kural girin!")
+        self._connect_monitor(True)
+
+    def _connect_monitor(self, activate=False):
+        from monitor import Monitor
+        if not load_config().get("wa_group_name", "").strip():
+            if activate:
+                messagebox.showwarning("Ayarlar", "WhatsApp grup adını kaydedin.")
             return
-        self.running=True
-        self.btn_baslat.configure(state="disabled")
-        self.btn_durdur.configure(state="normal")
-        self._log("🚀 Bot başlatılıyor…")
-        self.wa_bot=WABot(on_log=self._log,
-                          on_status=self._set_durum_p,
-                          on_message=self._on_mesaj_bitti)
-        threading.Thread(target=self.wa_bot.start,daemon=True).start()
+        def deliver(recipients, group, body, paths):
+            cfg = load_config()
+            ok, info = send_mail(recipients, group, "", body, cfg.get("outlook_account"), "", paths)
+            if ok:
+                db_ekle("", group, body, bool(paths))
+            else:
+                self._log(info)
+            return ok
+        self.wa_bot = Monitor(load_config, DB_FILE, PROFILE_DIR, deliver, self._log, self._mode)
+        self.wa_bot.switch(True if activate else self.wa_bot.active)
+        threading.Thread(target=self.wa_bot.run, daemon=True).start()
+
+    def _mode(self, active):
+        def update():
+            self.running = active
+            self.btn_baslat.configure(state="disabled" if active else "normal")
+            self.btn_durdur.configure(state="normal" if active else "disabled")
+            self._set_durum("● Aktif" if active else "● Uyku", RENK_YESIL if active else RENK_SARI)
+        self.after(0, update)
 
     def _durdur(self):
-        self.running=False
-        if self.wa_bot: self.wa_bot.stop(manuel=True); self.wa_bot=None
-        self.btn_baslat.configure(state="normal")
-        self.btn_durdur.configure(state="disabled")
-        self._set_durum("● Durduruldu",RENK_KIRMIZI)
-        self._log("■ Bot durduruldu.")
+        if self.wa_bot:
+            self.wa_bot.switch(False)
 
     def _ayarlar(self):
         AyarlarPencere(self)
@@ -1871,5 +1880,6 @@ if __name__=="__main__":
     app = App()
     splash = SplashEkran(app)
     app.after(2500, splash.kapat)
+    app.after(2600, app._connect_monitor)
     app.protocol("WM_DELETE_WINDOW", app.on_close)
     app.mainloop()
