@@ -47,4 +47,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.2.5 installer_output/* --target $env:GITHUB_SHA --title "Pregate Mail Botu v1.2.5" --notes "WhatsApp Web açık sohbet algılama, sohbet satırından açma ve mesaj taraması bildirimi."
+          gh release create v1.2.6 installer_output/* --target $env:GITHUB_SHA --title "Pregate Mail Botu v1.2.6" --notes "ReMax botundaki uyumlu WhatsApp mesaj okuma yaklaşımı ve komut ile gönderim aşamalarının log kaydı."
