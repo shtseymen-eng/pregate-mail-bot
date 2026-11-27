@@ -9,6 +9,11 @@ from contextlib import closing
 from pathlib import Path
 
 from selenium import webdriver
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    ElementNotInteractableException,
+    StaleElementReferenceException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
@@ -54,6 +59,7 @@ class Monitor:
         self.pending, self.photos, self.seen = {}, {}, set()
         self.last = {}
         self.targets = {}
+        self.last_chat_warning = None
         self.initialized = set()
         self.lock = threading.RLock()
         self.closed = threading.Event()
@@ -102,6 +108,19 @@ class Monitor:
             self.closed.wait(10)
 
     def open_chat(self, driver, title):
+        try:
+            return self._open_chat(driver, title)
+        except (ElementClickInterceptedException, ElementNotInteractableException):
+            now = time.monotonic()
+            if self.last_chat_warning is None or now - self.last_chat_warning >= 60:
+                self.log("WhatsApp sohbeti açılamadı. Açık bir pencere varsa kapatın. Chrome açık kalacak.")
+                self.last_chat_warning = now
+        except StaleElementReferenceException:
+            # WhatsApp refreshed the list. The next scan will locate the new row.
+            pass
+        return False
+
+    def _open_chat(self, driver, title):
         def matches():
             return any(el.get_attribute("title") == title for el in
                        driver.find_elements(By.CSS_SELECTOR, "#main header span[title]"))
@@ -109,7 +128,7 @@ class Monitor:
             return True
         results = driver.find_elements(By.CSS_SELECTOR, "#pane-side span[title]")
         for el in results:
-            if el.get_attribute("title") == title:
+            if el.is_displayed() and el.get_attribute("title") == title:
                 el.click()
                 for _ in range(20):
                     if matches():
