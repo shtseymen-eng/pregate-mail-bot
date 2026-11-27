@@ -1217,8 +1217,8 @@ class AyarlarPencere(ctk.CTkToplevel):
         self.test_address = ctk.CTkEntry(panel, width=360)
         self.test_address.insert(0, cfg.get("test_email", "sseymen@poliport.com"))
         self.test_address.pack()
-        ctk.CTkLabel(panel, text="Admin numaraları (uluslararası biçimde, virgülle ayırın)").pack()
-        self.admin_numbers = ctk.CTkEntry(panel, width=360)
+        ctk.CTkLabel(panel, text="Admin numaraları (Türkiye, virgülle ayırın)").pack()
+        self.admin_numbers = ctk.CTkEntry(panel, width=360, placeholder_text="05xx xxx xx xx veya +90 5xx xxx xx xx")
         self.admin_numbers.insert(0, ", ".join(cfg.get("admins", [])))
         self.admin_numbers.pack()
         wa_panel = ctk.CTkScrollableFrame(self.tab.tab("📱  WhatsApp"))
@@ -1496,7 +1496,15 @@ class AyarlarPencere(ctk.CTkToplevel):
             messagebox.showerror("Komut ön eki", "Ünlem gibi tek bir işaret girin.", parent=self)
             return
         cfg["command_prefix"] = prefix
-        cfg["admins"] = [x.strip() for x in self.admin_numbers.get().split(",") if x.strip()]
+        from monitor import turkish_phone
+        from tkinter import messagebox
+
+        numbers = [x.strip() for x in self.admin_numbers.get().split(",") if x.strip()]
+        admins = [turkish_phone(number) for number in numbers]
+        if any(not number for number in admins):
+            messagebox.showerror("Admin numarası", "Geçerli bir Türkiye cep telefonu numarası girin.", parent=self)
+            return
+        cfg["admins"] = list(dict.fromkeys(admins))
         cfg["test_email"] = self.test_address.get().strip()
         cfg["wa_group_name"] = self.ent_grup.get().strip()
         try: cfg["bekleme_dk"] = max(1,int(self.ent_sure.get().strip()))
