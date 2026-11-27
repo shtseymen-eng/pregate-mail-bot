@@ -1,4 +1,4 @@
-Pregate Mail Bot v1.2.3 - Windows x64
+Pregate Mail Bot v1.2.4 - Windows x64
 
 Requires Windows 10/11, installed Google Chrome, and classic Microsoft Outlook configured with your account. Outlook for Mac and new Outlook are not supported by this COM-based application.
 
