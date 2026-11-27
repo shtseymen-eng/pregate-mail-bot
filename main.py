@@ -90,16 +90,66 @@ _BOT_PREFIKSLERI = (
 )
 
 # ── Config ──────────────────────────────────────────────────────────────────
+DEFAULT_DEPARTMENT_RULES = (
+    ("Poliport", ("poliport", "port"), (
+        "Terminalsevkiyat@polisan.com.tr", "Pregatearackontrol@polisan.com.tr",
+    ), ("poliport", "port")),
+    ("Pregate", ("pregate", "deneme"), (
+        "Pregatearackontrol@polisan.com.tr",
+    ), ("pregate", "pregate-kayit", "deneme")),
+    ("Kimya", ("kimya", "yapıkim", "yapikim"), (
+        "K.sevkiyat@polisan.com.tr", "Pregatearackontrol@polisan.com.tr",
+    ), ("kimya", "yapıkim", "yapikim")),
+)
+CONFIG_LOCK = threading.RLock()
+
+
+def install_department_rules(cfg):
+    if cfg.get("department_defaults_v1"):
+        return False
+    from monitor import command_name
+
+    rules = cfg.setdefault("kurallar", [])
+    prefix = cfg.get("command_prefix") or "!"
+    for title, aliases, recipients, previous_names in DEFAULT_DEPARTMENT_RULES:
+        names = {command_name(name, prefix) for name in previous_names}
+        matches = [rule for rule in rules if command_name(
+            "-".join(rule.get("ad", "").split()), prefix
+        ) in names]
+        if matches:
+            selected = matches[0]
+            for duplicate in matches[1:]:
+                selected.setdefault("keywords", []).extend(duplicate.get("keywords", []))
+                rules.remove(duplicate)
+        else:
+            selected = {"id": uuid.uuid4().hex[:8], "ad": title}
+            rules.append(selected)
+        selected["keywords"] = list(dict.fromkeys([*selected.get("keywords", []), *aliases]))
+        selected["mail_list"] = list(recipients)
+    cfg["department_defaults_v1"] = True
+    return True
+
+
 def load_config():
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {"wa_group_name":"Pregate Kayıt Red","outlook_account":"","kurallar":[]}
+    with CONFIG_LOCK:
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as stream:
+                cfg = json.load(stream)
+        except FileNotFoundError:
+            cfg = {"wa_group_name": "Pregate Kayıt Red", "outlook_account": "", "kurallar": []}
+        except (OSError, ValueError):
+            return {"wa_group_name": "", "outlook_account": "", "kurallar": []}
+        if install_department_rules(cfg):
+            save_config(cfg)
+        return cfg
+
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    with CONFIG_LOCK:
+        temporary = CONFIG_FILE + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump(cfg, stream, ensure_ascii=False, indent=2)
+        os.replace(temporary, CONFIG_FILE)
 
 # ── Kayıt DB ────────────────────────────────────────────────────────────────
 def db_init():
@@ -1213,10 +1263,6 @@ class AyarlarPencere(ctk.CTkToplevel):
                 ctk.CTkLabel(commands, text=prefix + name + "   " + desc).pack(anchor="w")
         panel = self.tab.tab("Yönetim")
         cfg = load_config()
-        ctk.CTkLabel(panel, text="Deneme mail adresi").pack()
-        self.test_address = ctk.CTkEntry(panel, width=360)
-        self.test_address.insert(0, cfg.get("test_email", "sseymen@poliport.com"))
-        self.test_address.pack()
         ctk.CTkLabel(panel, text="Admin numaraları (Türkiye, virgülle ayırın)").pack()
         self.admin_numbers = ctk.CTkEntry(panel, width=360, placeholder_text="05xx xxx xx xx veya +90 5xx xxx xx xx")
         self.admin_numbers.insert(0, ", ".join(cfg.get("admins", [])))
@@ -1505,7 +1551,6 @@ class AyarlarPencere(ctk.CTkToplevel):
             messagebox.showerror("Admin numarası", "Geçerli bir Türkiye cep telefonu numarası girin.", parent=self)
             return
         cfg["admins"] = list(dict.fromkeys(admins))
-        cfg["test_email"] = self.test_address.get().strip()
         cfg["wa_group_name"] = self.ent_grup.get().strip()
         try: cfg["bekleme_dk"] = max(1,int(self.ent_sure.get().strip()))
         except: cfg["bekleme_dk"] = 2
