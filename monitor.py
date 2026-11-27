@@ -61,7 +61,6 @@ return [...titles].flatMap(el => [el.getAttribute('title'), el.innerText]).filte
 COMMON = {
     "?": "Komutları göster", "durum": "Gönderim durumunu göster",
     "start": "Gönderimi başlat (başla)", "stop": "Gönderimi durdur (dur)",
-    "deneme": "Ayarlardaki test adresine gönder",
 }
 STAFF = {"kontrol": "Bekleyen kaydı göster", "gönder": "Bekleyen kaydı şimdi gönder", "iptal": "Bekleyen kaydı iptal et", "son": "Son işlem sonucunu göster", "gruplar": "Departmanları listele"}
 ALIASES = {"başla": "start", "basla": "start", "dur": "stop", "durdur": "stop"}
@@ -100,10 +99,9 @@ def department_commands(cfg):
 
 def command_list(cfg, private):
     commands = dict(COMMON, **STAFF)
-    if not private:
-        for token, rules in department_commands(cfg).items():
-            if len(rules) == 1:
-                commands[token] = rules[0].get("ad", "") + " grubuna gönder"
+    for token, rules in department_commands(cfg).items():
+        if len(rules) == 1 and (not private or token == "deneme"):
+            commands[token] = rules[0].get("ad", "") + " grubuna gönder"
     return commands
 
 
@@ -281,7 +279,7 @@ class Monitor:
                 command = token.startswith(prefix)
                 token = command_name(token, prefix) if command else ""
                 token = ALIASES.get(token, token)
-                routes = {} if private else department_commands(cfg)
+                routes = department_commands(cfg)
                 allowed = command_list(cfg, private)
                 if command:
                     self.log("WhatsApp komutu algılandı: " + (token if token in allowed else "tanınmayan komut"))
@@ -342,11 +340,10 @@ class Monitor:
                 key = chat, sender
                 groups = routes.get(token, [])
                 group = None
-                if token == "deneme":
-                    group = ("DENEME", [cfg.get("test_email", "sseymen@poliport.com")])
-                    description = description or "Pregate Mail Botu deneme gönderimi."
-                elif not private and len(groups) == 1:
+                if len(groups) == 1 and (not private or token == "deneme"):
                     group = (groups[0]["ad"], groups[0]["mail_list"])
+                    if token == "deneme":
+                        description = description or "Pregate Mail Botu deneme gönderimi."
                 if group and description.strip() and all(group[1]) and group[1]:
                     if self.queue.admit(chat, mid, timestamp):
                         self.pending[(chat, mid)] = [key, now + window, group, description.strip(),
