@@ -1326,11 +1326,15 @@ class AyarlarPencere(ctk.CTkToplevel):
     def _render_kurallar(self):
         for item in self._kart_list: item[0].destroy()
         self._kart_list.clear()
-        for i, k in enumerate(load_config().get("kurallar",[])):
-            renk = RENKLER[i % len(RENKLER)]
-            kart, ea, ek, ec = self._kural_kart(self.scroll, k, renk)
-            kart.grid(row=i, column=0, sticky="ew", pady=(0,10))
-            self._kart_list.append((kart, k, ea, ek, ec))
+        for kural in load_config().get("kurallar", []):
+            self._kural_goster(kural)
+
+    def _kural_goster(self, kural):
+        row = self.scroll.grid_size()[1]
+        renk = RENKLER[row % len(RENKLER)]
+        kart, ad, keywords, cevap = self._kural_kart(self.scroll, kural, renk)
+        kart.grid(row=row, column=0, sticky="ew", pady=(0, 10))
+        self._kart_list.append((kart, kural, ad, keywords, cevap))
 
     def _kural_kart(self, parent, kural, renk):
         frame = ctk.CTkFrame(parent, fg_color=RENK_KART, corner_radius=10)
@@ -1413,23 +1417,19 @@ class AyarlarPencere(ctk.CTkToplevel):
         ctk.CTkButton(btn_row, text="🗑 Sil", width=70, height=26,
                       fg_color=RENK_KIRMIZI, hover_color="#a93226",
                       font=("Segoe UI",10),
-                      command=lambda k=kural,f=frame: self._kural_sil(k,f)
+                      command=lambda f=frame: self._kural_sil(f)
                       ).pack(side="left")
         return frame, ent_ad, ent_kw, ent_cevap
 
     def _kural_ekle(self):
-        cfg = load_config()
-        cfg.setdefault("kurallar",[]).append({
-            "id":str(uuid.uuid4())[:8],"ad":"Yeni Kural",
-            "keywords":[],"mail_list":[]})
-        save_config(cfg); self._render_kurallar()
+        self._kural_goster({
+            "id": str(uuid.uuid4())[:8], "ad": "Yeni Kural",
+            "keywords": [], "mail_list": [],
+        })
 
-    def _kural_sil(self, kural, frame):
-        cfg = load_config()
-        cfg["kurallar"] = [k for k in cfg.get("kurallar",[])
-                           if k.get("id") != kural.get("id")]
-        save_config(cfg); frame.destroy()
-        self._kart_list = [i for i in self._kart_list if i[0] != frame]
+    def _kural_sil(self, frame):
+        frame.destroy()
+        self._kart_list = [item for item in self._kart_list if item[0] is not frame]
 
     def _build_outlook(self, parent):
         parent.configure(fg_color=RENK_PANEL)
