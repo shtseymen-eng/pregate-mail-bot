@@ -47,4 +47,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.2.7 installer_output/* --target $env:GITHUB_SHA --title "Pregate Mail Botu v1.2.7" --notes "Geç yüklenen WhatsApp geçmişini mesaj zamanı ile filtrele. Açılış ve yeniden başlatma sonrasında eski komutları çalıştırma."
+          gh release create v1.2.8 installer_output/* --target $env:GITHUB_SHA --title "Pregate Mail Botu v1.2.8" --notes "Grup adları ve tanımlı komutlar ile alıcı eşleştirme, grup komutlarının gösterimi ve çakışma denetimi."
