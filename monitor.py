@@ -23,27 +23,31 @@ from command_queue import CommandQueue
 READ = """
 return [...document.querySelectorAll('#main [data-id]')].map(row => {
  const id = row.getAttribute('data-id');
- const body = row.querySelector('span.selectable-text');
+ const body = row.querySelector('[data-testid="msg-container"] span.selectable-text.copyable-text')
+           || row.querySelector('span.selectable-text.copyable-text')
+           || row.querySelector('span.selectable-text');
  const urls = [...row.querySelectorAll('img[src^="blob:"]')].map(i => i.src);
  return [id, body?.innerText || '', urls];
 });
 """
 
 
-COMMON = {"?": "Komutları göster", "durum": "Gönderim durumunu göster"}
+COMMON = {
+    "?": "Komutları göster", "durum": "Gönderim durumunu göster",
+    "start": "Gönderimi başlat (başla)", "stop": "Gönderimi durdur (dur)",
+    "deneme": "Ayarlardaki test adresine gönder",
+}
 STAFF = {"kontrol": "Bekleyen kaydı göster", "gönder": "Bekleyen kaydı şimdi gönder", "iptal": "Bekleyen kaydı iptal et", "son": "Son işlem sonucunu göster", "gruplar": "Departmanları listele"}
-ADMIN = {"start": "Gönderimi başlat", "stop": "Gönderimi durdur", "deneme": "Test adresine gönder"}
+ALIASES = {"başla": "start", "basla": "start", "dur": "stop", "durdur": "stop"}
 
 
 def command_list(cfg, private):
     commands = dict(COMMON, **STAFF)
-    if private:
-        commands.update(ADMIN)
-    else:
+    if not private:
         for rule in cfg.get("kurallar", []):
             for word in rule.get("keywords", []):
                 name = word.strip().lstrip("!").casefold()
-                if name and name not in ADMIN:
+                if name and name not in ALIASES:
                     commands.setdefault(name, rule.get("ad", "") + " grubuna gönder")
     return commands
 
@@ -73,7 +77,6 @@ class Monitor:
                 self.active = active
                 self.pending.clear()
                 self.photos.clear()
-                self.initialized.clear()
             self.status(active)
 
     def stop(self, manuel=True):
@@ -145,22 +148,26 @@ class Monitor:
             baseline = target not in self.initialized
             self.initialized.add(target)
             for mid, body, urls in rows:
-                if mid in self.seen or not mid.startswith("false_"):
+                if mid in self.seen or not mid.startswith(("false_", "true_")):
                     continue
                 self.seen.add(mid)
                 if baseline:
                     continue
-                parts = mid.split("_")
+                parts = mid.split("_", 3)
+                if len(parts) < 3:
+                    continue
+                outgoing = parts[0] == "true"
                 chat = parts[1]
                 if private:
                     phone = chat.partition("@")[0]
-                    if not chat.endswith("@c.us") or phone != re.sub(r"\D", "", target):
+                    if outgoing or not chat.endswith("@c.us") or phone != re.sub(r"\D", "", target):
                         continue
                     sender = phone
                 else:
-                    if not chat.endswith("@g.us") or len(parts) < 4:
+                    if not chat.endswith("@g.us"):
                         continue
-                    sender = parts[-1]
+                    # The linked phone's messages can omit the group participant suffix.
+                    sender = "self" if outgoing else parts[3] if len(parts) == 4 else mid
                 self.targets[chat] = target
                 prefix = cfg.get("command_prefix") or "!"
                 key = chat, sender
@@ -169,6 +176,7 @@ class Monitor:
                 token, _, description = " ".join(body.split()).partition(" ")
                 command = token.startswith(prefix)
                 token = token[len(prefix):].casefold() if command else ""
+                token = ALIASES.get(token, token)
                 allowed = command_list(cfg, private)
                 if command and token not in allowed:
                     reply("Komut tanınmadı veya yetkiniz yok. Liste için " + prefix + "? yazın.")
@@ -176,12 +184,17 @@ class Monitor:
                 if command:
                     reply("Komut alındı.")
                 if command and token == "?":
-                    reply(" | ".join(prefix + k + " — " + v for k, v in allowed.items()))
+                    reply("Komutlar • " + " | ".join(prefix + k + " — " + v for k, v in allowed.items()))
                     continue
                 if command and token in ("start", "stop", "durum"):
                     if token != "durum":
                         self.switch(token == "start")
-                    reply("Mail gönderimi " + ("aktif." if self.active else "durduruldu."))
+                    if token == "start":
+                        reply("Çalışmaya başladım. Yeni red kayıtlarını alıyorum.")
+                    elif token == "stop":
+                        reply("Durdum. Mail gönderimi durduruldu.")
+                    else:
+                        reply("Mail gönderimi " + ("aktif." if self.active else "durduruldu."))
                     continue
                 if command and token == "gruplar":
                     reply("Gruplar: " + (", ".join(r["ad"] for r in cfg.get("kurallar", [])) or "Tanımlı grup yok."))
@@ -215,8 +228,9 @@ class Monitor:
                 groups = [k for k in cfg.get("kurallar", []) if token in
                           {word.strip().lstrip("!").casefold() for word in k.get("keywords", [])}]
                 group = None
-                if private and token == "deneme":
-                    group = ("DENEME", [cfg.get("test_email", "")])
+                if token == "deneme":
+                    group = ("DENEME", [cfg.get("test_email", "sseymen@poliport.com")])
+                    description = description or "Pregate Mail Botu deneme gönderimi."
                 elif not private and len(groups) == 1:
                     group = (groups[0]["ad"], groups[0]["mail_list"])
                 if group and description.strip() and all(group[1]) and group[1]:
