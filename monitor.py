@@ -22,15 +22,27 @@ from command_queue import CommandQueue
 
 
 READ = """
-return [...document.querySelectorAll('#main [data-id]')].map(row => {
- const id = row.getAttribute('data-id');
- const body = row.querySelector('[data-testid="msg-text"]')
-           || row.querySelector('[data-testid="msg-container"] span.selectable-text.copyable-text')
-           || row.querySelector('span.selectable-text.copyable-text')
-           || row.querySelector('span.selectable-text');
- const urls = [...row.querySelectorAll('img[src^="blob:"]')].map(i => i.src);
- return [id, body?.innerText || '', urls];
-});
+const main = document.querySelector('#main');
+const messages = new Map();
+const candidates = main?.querySelectorAll(
+    '[data-testid="msg-container"], .message-in, .message-out, [data-pre-plain-text], [data-id]'
+) || [];
+for (const node of candidates) {
+    const row = node.closest('.message-in, .message-out') ||
+                node.closest('[data-id]') || node.closest('[data-testid="msg-container"]');
+    if (!row || row.closest('[data-testid="quoted-message"]')) continue;
+    const id = (row.closest('[data-id]') || row.querySelector('[data-id]'))?.getAttribute('data-id');
+    const metadata = row.querySelector('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text') || '';
+    const body = row.querySelector('[data-testid="msg-text"]') ||
+                 row.querySelector('span.selectable-text.copyable-text, span.selectable-text, [data-lexical-text="true"]');
+    const text = body?.innerText || '';
+    const urls = [...new Set([...row.querySelectorAll('img[src^="blob:"]')].map(image => image.src))];
+    const key = id || (metadata && text ? 'meta:' + metadata + text : '');
+    if (key && (text || urls.length)) {
+        messages.set(key, [key, text, urls, row.matches('.message-out'), metadata]);
+    }
+}
+return [...messages.values()];
 """
 
 
@@ -188,27 +200,30 @@ class Monitor:
             self.initialized.add(target)
             if baseline and not private:
                 self.log(f"WhatsApp grubu doğrulandı. Yeni mesajlar izleniyor ({len(rows)} mevcut mesaj atlandı).")
-            for mid, body, urls in rows:
-                if mid in self.seen or not mid.startswith(("false_", "true_")):
+            for mid, body, urls, outgoing, metadata in rows:
+                if mid in self.seen:
                     continue
                 self.seen.add(mid)
                 if baseline:
                     continue
-                parts = mid.split("_", 3)
-                if len(parts) < 3:
-                    continue
-                outgoing = parts[0] == "true"
-                chat = parts[1]
-                if private:
-                    phone = chat.partition("@")[0]
-                    if outgoing or not chat.endswith("@c.us") or phone != re.sub(r"\D", "", target):
-                        continue
-                    sender = phone
+                address = re.match(r"^(true|false)_([^_]+)_[^_]+(?:_(.+))?$", mid)
+                if address:
+                    direction, chat_id, participant = address.groups()
+                    outgoing = outgoing or direction == "true"
                 else:
-                    if not chat.endswith("@g.us"):
+                    chat_id, participant = "", None
+                if private:
+                    phone = chat_id.partition("@")[0]
+                    if outgoing or not chat_id.endswith("@c.us") or phone != turkish_phone(target):
                         continue
-                    # The linked phone's messages can omit the group participant suffix.
-                    sender = "self" if outgoing else parts[3] if len(parts) == 4 else mid
+                    chat, sender = chat_id, phone
+                else:
+                    if "@" in chat_id and not chat_id.endswith("@g.us"):
+                        continue
+                    # open_chat already verified the configured group by its title.
+                    chat = "group:" + target
+                    author = metadata.partition("] ")[2].removesuffix(": ")
+                    sender = "self" if outgoing else participant or author or mid
                 self.targets[chat] = target
                 prefix = cfg.get("command_prefix") or "!"
                 key = chat, sender
@@ -219,6 +234,8 @@ class Monitor:
                 token = token[len(prefix):].casefold() if command else ""
                 token = ALIASES.get(token, token)
                 allowed = command_list(cfg, private)
+                if command:
+                    self.log("WhatsApp komutu algılandı: " + (token if token in allowed else "tanınmayan komut"))
                 if command and token not in allowed:
                     reply("Komut tanınmadı veya yetkiniz yok. Liste için " + prefix + "? yazın.")
                     continue
@@ -278,7 +295,8 @@ class Monitor:
                     if self.queue.admit(chat, mid, now):
                         self.pending[(chat, mid)] = [key, now + window, group, description.strip(),
                             [p for when, p in self.photos.pop(key, []) if now - when <= window]]
-                        reply(group[0] + " kaydı alındı. Fotoğraflar bekleniyor.")
+                        self.log(f"{group[0]} kayda alındı. Gönderim {window // 60} dk içinde planlandı.")
+                        reply(f"{group[0]} kaydı alındı. Fotoğraflar için {window // 60} dk bekleniyor.")
                 elif command:
                     reply("Kayıt açılamadı. Açıklamayı ve departman alıcılarını kontrol edin.")
                 if urls:
@@ -299,9 +317,15 @@ class Monitor:
                 self.photos[key] = [(t,p) for t,p in self.photos.get(key,[]) if now-t<=window]
 
     def reply(self, driver, message):
-        editors = driver.find_elements(By.CSS_SELECTOR, "#main footer [contenteditable=true]")
-        if editors:
-            editors[-1].send_keys(message, Keys.ENTER)
+        editors = driver.find_elements(By.CSS_SELECTOR, "#main footer [contenteditable=true], #main [contenteditable=true][role=textbox]")
+        for editor in reversed(editors):
+            try:
+                if editor.is_displayed():
+                    editor.send_keys(message, Keys.ENTER)
+                    return
+            except (ElementNotInteractableException, StaleElementReferenceException):
+                continue
+        self.log("WhatsApp yanıtı yazılamadı. Mesaj kutusu bulunamadı veya kullanılamıyor.")
 
     def flush(self, driver):
         with self.lock:
