@@ -76,14 +76,34 @@ def turkish_phone(value):
     return cleaned if re.fullmatch(r"905[0-9]{9}", cleaned) else ""
 
 
+def command_name(value, prefix):
+    value = value.strip()
+    if value.startswith(prefix):
+        value = value[len(prefix):]
+    elif value.startswith("!"):
+        value = value[1:]
+    return unicodedata.normalize("NFKC", value).casefold().replace("i\u0307", "i").replace("ı", "i")
+
+
+def department_commands(cfg):
+    prefix = cfg.get("command_prefix") or "!"
+    routes = {}
+    reserved = set(COMMON) | set(STAFF) | set(ALIASES)
+    for rule in cfg.get("kurallar", []):
+        name = re.sub(r"\s+", "-", rule.get("ad", "").strip())
+        tokens = {command_name(word, prefix) for word in [name, *rule.get("keywords", [])]}
+        for token in sorted(tokens):
+            if token and not any(ch.isspace() for ch in token) and token not in reserved:
+                routes.setdefault(token, []).append(rule)
+    return routes
+
+
 def command_list(cfg, private):
     commands = dict(COMMON, **STAFF)
     if not private:
-        for rule in cfg.get("kurallar", []):
-            for word in rule.get("keywords", []):
-                name = word.strip().lstrip("!").casefold()
-                if name and name not in ALIASES:
-                    commands.setdefault(name, rule.get("ad", "") + " grubuna gönder")
+        for token, rules in department_commands(cfg).items():
+            if len(rules) == 1:
+                commands[token] = rules[0].get("ad", "") + " grubuna gönder"
     return commands
 
 
@@ -259,13 +279,17 @@ class Monitor:
                     self.reply(driver, message)
                 token, _, description = " ".join(body.split()).partition(" ")
                 command = token.startswith(prefix)
-                token = token[len(prefix):].casefold() if command else ""
+                token = command_name(token, prefix) if command else ""
                 token = ALIASES.get(token, token)
+                routes = {} if private else department_commands(cfg)
                 allowed = command_list(cfg, private)
                 if command:
                     self.log("WhatsApp komutu algılandı: " + (token if token in allowed else "tanınmayan komut"))
                 if command and token not in allowed:
-                    reply("Komut tanınmadı veya yetkiniz yok. Liste için " + prefix + "? yazın.")
+                    if len(routes.get(token, [])) > 1:
+                        reply("Bu komut birden fazla mail grubuna tanımlı. Ayarlar → Kurallar bölümünü kontrol edin.")
+                    else:
+                        reply("Komut tanınmadı. Liste için " + prefix + "? yazın.")
                     continue
                 if command:
                     reply("Komut alındı.")
@@ -283,7 +307,9 @@ class Monitor:
                         reply("Mail gönderimi " + ("aktif." if self.active else "durduruldu."))
                     continue
                 if command and token == "gruplar":
-                    reply("Gruplar: " + (", ".join(r["ad"] for r in cfg.get("kurallar", [])) or "Tanımlı grup yok."))
+                    groups = [f"{prefix}{name} → {rules[0]['ad']}"
+                              for name, rules in department_commands(cfg).items() if len(rules) == 1]
+                    reply("Gruplar: " + (", ".join(groups) or "Tanımlı grup komutu yok."))
                     continue
                 if command and token == "son":
                     reply(self.last.get(key, "Bu oturumda tamamlanan işleminiz yok."))
@@ -314,8 +340,7 @@ class Monitor:
                     continue
                 window = max(1, int(cfg.get("bekleme_dk", 2))) * 60
                 key = chat, sender
-                groups = [k for k in cfg.get("kurallar", []) if token in
-                          {word.strip().lstrip("!").casefold() for word in k.get("keywords", [])}]
+                groups = routes.get(token, [])
                 group = None
                 if token == "deneme":
                     group = ("DENEME", [cfg.get("test_email", "sseymen@poliport.com")])
