@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import closing
 from pathlib import Path
 
@@ -23,12 +24,24 @@ from command_queue import CommandQueue
 READ = """
 return [...document.querySelectorAll('#main [data-id]')].map(row => {
  const id = row.getAttribute('data-id');
- const body = row.querySelector('[data-testid="msg-container"] span.selectable-text.copyable-text')
+ const body = row.querySelector('[data-testid="msg-text"]')
+           || row.querySelector('[data-testid="msg-container"] span.selectable-text.copyable-text')
            || row.querySelector('span.selectable-text.copyable-text')
            || row.querySelector('span.selectable-text');
  const urls = [...row.querySelectorAll('img[src^="blob:"]')].map(i => i.src);
  return [id, body?.innerText || '', urls];
 });
+"""
+
+
+ACTIVE_CHAT_LABELS = """
+const main = document.querySelector('#main');
+const header = main?.querySelector('header, [data-testid="conversation-header"], [role="banner"]');
+if (!header) return [];
+const titles = header.querySelectorAll(
+  '[data-testid="conversation-info-header-chat-title"], [dir="auto"], [title]'
+);
+return [...titles].flatMap(el => [el.getAttribute('title'), el.innerText]).filter(Boolean);
 """
 
 
@@ -133,24 +146,37 @@ class Monitor:
         return False
 
     def _open_chat(self, driver, title):
-        def title_matches(element):
-            value = element.get_attribute("title") or ""
-            return value == title or (bool(turkish_phone(title)) and turkish_phone(value) == title)
+        def normalize(value):
+            clean = unicodedata.normalize("NFC", value).translate(
+                dict.fromkeys(map(ord, "\u200b\u200e\u200f\ufeff"))
+            )
+            return " ".join(clean.split()).casefold()
+
+        expected = normalize(title)
+        phone = turkish_phone(title)
+
+        def same_title(value):
+            return normalize(value) == expected or bool(phone and turkish_phone(value) == phone)
 
         def matches():
-            return any(title_matches(el) for el in
-                       driver.find_elements(By.CSS_SELECTOR, "#main header span[title]"))
+            return any(same_title(value) for value in driver.execute_script(ACTIVE_CHAT_LABELS))
+
         if matches():
             return True
-        results = driver.find_elements(By.CSS_SELECTOR, "#pane-side span[title]")
-        for el in results:
-            if el.is_displayed() and title_matches(el):
-                el.click()
-                for _ in range(20):
-                    if matches():
-                        return True
-                    time.sleep(.1)
-                break
+        for element in driver.find_elements(By.CSS_SELECTOR, "#pane-side [title]"):
+            if not element.is_displayed() or not same_title(element.get_attribute("title") or ""):
+                continue
+            row = driver.execute_script(
+                "return arguments[0].closest('[role=row], [role=listitem], [data-testid=cell-frame-container]') || arguments[0]",
+                element,
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block: 'nearest'})", row)
+            row.click()
+            for _ in range(20):
+                if matches():
+                    return True
+                time.sleep(.1)
+            break
         return False
 
     def scan(self, driver, target, private, cfg):
@@ -160,6 +186,8 @@ class Monitor:
         with self.lock:
             baseline = target not in self.initialized
             self.initialized.add(target)
+            if baseline and not private:
+                self.log(f"WhatsApp grubu doğrulandı. Yeni mesajlar izleniyor ({len(rows)} mevcut mesaj atlandı).")
             for mid, body, urls in rows:
                 if mid in self.seen or not mid.startswith(("false_", "true_")):
                     continue
