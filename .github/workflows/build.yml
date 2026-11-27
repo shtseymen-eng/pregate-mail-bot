@@ -47,4 +47,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.2.0 installer_output/* --target $env:GITHUB_SHA --title "Pregate Mail Botu v1.2.0" --notes "Windows x64 • Komut alındı ve mail atıldı bildirimleri, yetkiye göre komut yardımı ve kompakt pencere."
+          gh release create v1.2.1 installer_output/* --target $env:GITHUB_SHA --title "Pregate Mail Botu v1.2.1" --notes "Windows x64 • WhatsApp sohbetine tıklama engellendiğinde Chrome açık kalır ve bot yeniden dener."
