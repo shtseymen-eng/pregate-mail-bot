@@ -41,6 +41,15 @@ STAFF = {"kontrol": "Bekleyen kaydı göster", "gönder": "Bekleyen kaydı şimd
 ALIASES = {"başla": "start", "basla": "start", "dur": "stop", "durdur": "stop"}
 
 
+def turkish_phone(value):
+    cleaned = re.sub(r"[\s()+-]", "", value)
+    if cleaned.startswith("0090"):
+        cleaned = cleaned[2:]
+    elif re.fullmatch(r"0?5[0-9]{9}", cleaned):
+        cleaned = "90" + cleaned.lstrip("0")
+    return cleaned if re.fullmatch(r"905[0-9]{9}", cleaned) else ""
+
+
 def command_list(cfg, private):
     commands = dict(COMMON, **STAFF)
     if not private:
@@ -95,7 +104,7 @@ class Monitor:
                 self.log("WhatsApp Web açıldı. Gerekirse QR kodunu okutun.")
                 while not self.closed.wait(1):
                     cfg = self.config()
-                    admins = [x.strip() for x in cfg.get("admins", []) if x.strip()]
+                    admins = list(dict.fromkeys(filter(None, map(turkish_phone, cfg.get("admins", [])))))
                     for target in [cfg.get("wa_group_name", "")] + admins:
                         if target and self.open_chat(driver, target):
                             self.scan(driver, target, target in admins, cfg)
@@ -124,14 +133,18 @@ class Monitor:
         return False
 
     def _open_chat(self, driver, title):
+        def title_matches(element):
+            value = element.get_attribute("title") or ""
+            return value == title or (bool(turkish_phone(title)) and turkish_phone(value) == title)
+
         def matches():
-            return any(el.get_attribute("title") == title for el in
+            return any(title_matches(el) for el in
                        driver.find_elements(By.CSS_SELECTOR, "#main header span[title]"))
         if matches():
             return True
         results = driver.find_elements(By.CSS_SELECTOR, "#pane-side span[title]")
         for el in results:
-            if el.is_displayed() and el.get_attribute("title") == title:
+            if el.is_displayed() and title_matches(el):
                 el.click()
                 for _ in range(20):
                     if matches():
