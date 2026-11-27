@@ -7,6 +7,7 @@ import threading
 import time
 import unicodedata
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 from selenium import webdriver
@@ -32,7 +33,7 @@ for (const node of candidates) {
                 node.closest('[data-id]') || node.closest('[data-testid="msg-container"]');
     if (!row || row.closest('[data-testid="quoted-message"]')) continue;
     const id = (row.closest('[data-id]') || row.querySelector('[data-id]'))?.getAttribute('data-id');
-    const metadata = row.querySelector('[data-pre-plain-text]')?.getAttribute('data-pre-plain-text') || '';
+    const metadata = (row.matches('[data-pre-plain-text]') ? row : row.querySelector('[data-pre-plain-text]'))?.getAttribute('data-pre-plain-text') || '';
     const body = row.querySelector('[data-testid="msg-text"]') ||
                  row.querySelector('span.selectable-text.copyable-text, span.selectable-text, [data-lexical-text="true"]');
     const text = body?.innerText || '';
@@ -86,6 +87,29 @@ def command_list(cfg, private):
     return commands
 
 
+def message_timestamp(metadata):
+    # WhatsApp Web's Turkish message metadata exposes time at minute resolution.
+    match = re.match(
+        r"^\[\s*(?:(ÖÖ|ÖS|AM|PM)\s*)?(\d{1,2}):(\d{2})"
+        r"(?:\s*(ÖÖ|ÖS|AM|PM))?\s*,?\s+(\d{1,2})[./](\d{1,2})[./](\d{4}|\d{2})\s*\]",
+        metadata, re.IGNORECASE,
+    )
+    if not match:
+        return None
+    before, hour, minute, after, day, month, year = match.groups()
+    marker = (before or after or "").upper()
+    hour = int(hour)
+    if marker:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if marker in ("ÖS", "PM") else 0)
+    try:
+        year = int(year) + (2000 if len(year) == 2 else 0)
+        return datetime(year, int(month), int(day), hour, int(minute)).timestamp()
+    except ValueError:
+        return None
+
+
 class Monitor:
     def __init__(self, config, db, profile, deliver, log, status):
         self.config, self.profile, self.deliver = config, profile, deliver
@@ -101,7 +125,7 @@ class Monitor:
         self.initialized = set()
         self.lock = threading.RLock()
         self.closed = threading.Event()
-        self.since = time.time()
+        self.since = self.session_since = time.time()
 
     def switch(self, active):
         with self.lock:
@@ -199,12 +223,16 @@ class Monitor:
             baseline = target not in self.initialized
             self.initialized.add(target)
             if baseline and not private:
-                self.log(f"WhatsApp grubu doğrulandı. Yeni mesajlar izleniyor ({len(rows)} mevcut mesaj atlandı).")
+                self.log(f"WhatsApp grubu doğrulandı. Yeni mesajlar izleniyor ({len(rows)} mevcut mesaj atlandı). Başlatma dakikasından sonraki mesajlar alınır.")
             for mid, body, urls, outgoing, metadata in rows:
                 if mid in self.seen:
                     continue
                 self.seen.add(mid)
                 if baseline:
+                    continue
+                timestamp = message_timestamp(metadata)
+                now = time.time()
+                if timestamp is None or not self.session_since <= timestamp <= now:
                     continue
                 address = re.match(r"^(true|false)_([^_]+)_[^_]+(?:_(.+))?$", mid)
                 if address:
@@ -280,7 +308,10 @@ class Monitor:
                     if command:
                         reply("Gönderim durduruldu.")
                     continue
-                now = time.time()
+                if timestamp < self.since:
+                    if command:
+                        reply("Kayıt alınmadı. Başlatma dakikası geçtikten sonra komutu yeniden yazın.")
+                    continue
                 window = max(1, int(cfg.get("bekleme_dk", 2))) * 60
                 key = chat, sender
                 groups = [k for k in cfg.get("kurallar", []) if token in
@@ -292,7 +323,7 @@ class Monitor:
                 elif not private and len(groups) == 1:
                     group = (groups[0]["ad"], groups[0]["mail_list"])
                 if group and description.strip() and all(group[1]) and group[1]:
-                    if self.queue.admit(chat, mid, now):
+                    if self.queue.admit(chat, mid, timestamp):
                         self.pending[(chat, mid)] = [key, now + window, group, description.strip(),
                             [p for when, p in self.photos.pop(key, []) if now - when <= window]]
                         self.log(f"{group[0]} kayda alındı. Gönderim {window // 60} dk içinde planlandı.")
